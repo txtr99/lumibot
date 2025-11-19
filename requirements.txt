@@ -39,3 +39,5 @@ Flask>=2.3
 free-proxy
 requests-oauthlib
 boto3>=1.40.64
+rich
+duckdb
