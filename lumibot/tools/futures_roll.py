@@ -48,6 +48,11 @@ ROLL_RULES.update(
             anchor="third_last_business_day",
             contract_months=(2, 4, 6, 8, 10, 12),
         ),
+        "MGC": RollRule(
+            offset_business_days=7,
+            anchor="third_last_business_day",
+            contract_months=(2, 4, 6, 8, 10, 12),
+        ),
         "SI": RollRule(
             offset_business_days=7,
             anchor="third_last_business_day",
