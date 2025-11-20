@@ -16,6 +16,7 @@ Date: 2025-11-18
 """
 
 import logging
+from collections import deque
 from datetime import datetime
 from typing import Dict, Optional
 
@@ -50,9 +51,12 @@ class StrategyAttribution:
         >>> print(report)
     """
 
-    def __init__(self):
+    def __init__(self, max_snapshots: int = 200000):
         """Initialize the StrategyAttribution tracker."""
+        safe_max = max(1, int(max_snapshots))
         self.strategy_metrics: Dict[str, dict] = {}
+        self.snapshots = deque(maxlen=safe_max)
+        self.max_snapshots = safe_max
         self.logger = logging.getLogger(__name__)
 
     def register_strategy(self, strategy_id: str, initial_capital: float = 0.0) -> None:
@@ -80,6 +84,25 @@ class StrategyAttribution:
         }
 
         self.logger.info(f"Registered strategy {strategy_id} with capital ${initial_capital:.2f}")
+
+    def record_snapshot(self, strategy_id: str, snapshot: dict) -> None:
+        """
+        Record a per-bar snapshot for a strategy (lightweight when disabled elsewhere).
+
+        Args:
+            strategy_id: Strategy identifier
+            snapshot: Dictionary with snapshot fields (timestamp, symbol, position, pnl, etc.)
+        """
+        if strategy_id not in self.strategy_metrics:
+            self.register_strategy(strategy_id)
+        snapshot = {"strategy_id": strategy_id, **snapshot}
+        self.snapshots.append(snapshot)
+
+    def get_snapshots_df(self) -> pd.DataFrame:
+        """Return snapshots as a DataFrame (empty if none)."""
+        if not self.snapshots:
+            return pd.DataFrame()
+        return pd.DataFrame(list(self.snapshots))
 
     def record_trade(
         self, strategy_id: str, entry_price: float, exit_price: float, quantity: float, timestamp: datetime = None

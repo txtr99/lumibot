@@ -215,6 +215,11 @@ class PortfolioManager:
         cache_ttl_seconds: int = 60,
         min_order_delay_seconds: float = 2.0,
         default_atr_period: int = 20,
+        enable_snapshots: bool = True,
+        simulate_fills: bool = True,
+        max_snapshots: int = 200000,
+        timestep: str = "minute",
+        shared_initial_capital: float = 150000.0,
     ):
         """
         Initialize the PortfolioManager.
@@ -256,6 +261,11 @@ class PortfolioManager:
             "cache_ttl_seconds": cache_ttl_seconds,
             "min_order_delay_seconds": min_order_delay_seconds,
             "default_atr_period": default_atr_period,
+            "enable_snapshots": enable_snapshots,
+            "simulate_fills": simulate_fills,
+            "max_snapshots": max_snapshots,
+            "timestep": timestep,
+            "shared_initial_capital": shared_initial_capital,
         }
 
         # Auto-load strategies if requested
@@ -731,6 +741,38 @@ class PortfolioManager:
         if self.executor:
             return self.executor.get_performance_report()
         return None
+
+    def export_snapshots(self, folder: Path) -> Optional[Path]:
+        """
+        Export per-bar snapshots to CSV if enabled and available.
+
+        Args:
+            folder: Destination folder
+
+        Returns:
+            Path to CSV if written, else None
+        """
+        if self.executor is None or not getattr(self.executor, "enable_snapshots", False):
+            return None
+        df = self.executor.attribution.get_snapshots_df()
+        if df.empty:
+            return None
+        folder.mkdir(parents=True, exist_ok=True)
+        out_path = folder / "snapshots.csv"
+        # Write in chunks to reduce peak memory usage on very large snapshots
+        chunk_size = 50000
+        if len(df) <= chunk_size:
+            df.to_csv(out_path, index=False)
+        else:
+            with out_path.open("w") as f:
+                start = 0
+                end = chunk_size
+                df.iloc[start:end].to_csv(f, index=False, header=True)
+                while end < len(df):
+                    start = end
+                    end = min(len(df), start + chunk_size)
+                    df.iloc[start:end].to_csv(f, index=False, header=False)
+        return out_path
 
     def _get_load_summary(self) -> Dict[str, Any]:
         """Get summary of loading results."""

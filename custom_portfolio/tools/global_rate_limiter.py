@@ -233,13 +233,17 @@ class GlobalRateLimiter:
         """
         with self.lock:
             avg_wait = (self.total_wait_time / self.total_waits) if self.total_waits > 0 else 0.0
+            if self.last_order_time == 0.0:
+                elapsed = float("inf")
+            else:
+                elapsed = time.time() - self.last_order_time
 
             return {
                 "orders_submitted": self.orders_submitted,
                 "total_waits": self.total_waits,
                 "total_wait_time": self.total_wait_time,
                 "avg_wait_time": avg_wait,
-                "time_since_last_order": self.get_elapsed_since_last_order(),
+                "time_since_last_order": elapsed,
                 "min_delay_seconds": self.min_delay_seconds,
             }
 

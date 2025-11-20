@@ -43,7 +43,6 @@ STRATEGY_CONFIG = {
         "exit_on_session_end": True,
     },
     "allowed_sessions": ["New_York"],
-    "initial_capital": 10000.0,
 }
 
 

@@ -43,8 +43,7 @@ STRATEGY_CONFIG = {
         "max_bars_in_trade": 180,  # 180-minute time exit
         "exit_on_session_end": True,
     },
-    "allowed_sessions": ["New_York"],
-    "initial_capital": 10000.0,
+    "allowed_sessions": ["24/7"],
 }
 
 

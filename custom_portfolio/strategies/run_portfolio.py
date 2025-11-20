@@ -149,6 +149,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -161,6 +162,8 @@ from custom_portfolio.strategies.portfolio_manager import PortfolioManager  # no
 from lumibot.backtesting import DataBentoDataBacktesting  # noqa: E402
 from lumibot.entities import TradingFee  # noqa: E402
 from lumibot.strategies import Strategy  # noqa: E402
+from lumibot.backtesting import DataBentoDataBacktesting as DBDataSource  # type: ignore # noqa: E402
+from lumibot.backtesting import DataBentoDataBacktestingPandas  # noqa: E402
 
 # Global flag for interrupt handling
 _interrupted = False
@@ -189,6 +192,55 @@ def setup_logging(log_level: str = "INFO") -> None:
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=[logging.StreamHandler(), logging.FileHandler("portfolio_runner.log")],
     )
+
+
+def _env_flag(name: str, default: bool = True) -> bool:
+    """Parse a boolean-ish environment variable with a default (case-insensitive)."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _snapshot_config():
+    enable_snapshots = os.environ.get("PORTFOLIO_SNAPSHOTS", "true").lower() == "true"
+    try:
+        max_snapshots = int(os.environ.get("PORTFOLIO_MAX_SNAPSHOTS", "200000"))
+    except Exception:
+        print("Invalid PORTFOLIO_MAX_SNAPSHOTS; defaulting to 200000")
+        max_snapshots = 200000
+    if max_snapshots <= 0:
+        # Treat non-positive as disabling snapshots
+        enable_snapshots = False
+        max_snapshots = 1
+    timestep = "minute"
+    return enable_snapshots, max_snapshots, timestep
+
+
+def _simulate_fills_config():
+    """Read DRY_RUN env to control simulated fills (default true)."""
+    return os.environ.get("DRY_RUN", "true").lower() == "true"
+
+
+def _capital_config():
+    """Shared starting capital for the portfolio (applied to all strategies for attribution)."""
+    try:
+        return float(os.environ.get("TOTAL_INITIAL_CAPITAL", "150000"))
+    except Exception:
+        return 150000.0
+
+
+def _debug_config():
+    """Enable verbose portfolio debug logs (prefetch + iterations)."""
+    return os.environ.get("PORTFOLIO_DEBUG", "true").lower() == "true"
+
+
+def _visual_config():
+    """Read visualization toggles from env with defaults of True when unset."""
+    show_plot = _env_flag("SHOW_PLOT", True)
+    show_tearsheet = _env_flag("SHOW_TEARSHEET", True)
+    show_indicators = _env_flag("SHOW_INDICATORS", True)
+    return show_plot, show_tearsheet, show_indicators
 
 
 def create_broker_for_backtesting():
@@ -274,6 +326,12 @@ def run_backtest(args):
     # Read backtest dates from environment variables
     start_date_str = os.environ.get("BACKTESTING_START")
     end_date_str = os.environ.get("BACKTESTING_END")
+    enable_snapshots, max_snapshots, timestep = _snapshot_config()
+    simulate_fills = _simulate_fills_config()
+    shared_initial_capital = _capital_config()
+    debug_logs = _debug_config()
+    show_plot, show_tearsheet, show_indicators = _visual_config()
+    print(f"[SETTINGS] plot={show_plot} tearsheet={show_tearsheet} indicators={show_indicators}")
 
     if not start_date_str or not end_date_str:
         print(TF.error("BACKTESTING_START and BACKTESTING_END must be set in .env file"))
@@ -294,16 +352,46 @@ def run_backtest(args):
     class PortfolioStrategy(Strategy):
         """Wrapper strategy for portfolio backtesting."""
 
+        # Keep reference to last manager for exports
+        _last_manager = None
+
         def initialize(self):
             """Initialize the portfolio manager."""
+            # Track backtest window for progress logging (use private attrs to avoid clashing with properties)
+            self._progress_start = backtesting_start
+            self._progress_end = backtesting_end
+            # Align progress timestamps to the strategy clock timezone to avoid naive/aware subtraction
+            try:
+                sample_dt = self.get_datetime()
+            except Exception:
+                sample_dt = None
+            if sample_dt is not None and isinstance(sample_dt, datetime):
+                if self._progress_start.tzinfo is None and sample_dt.tzinfo is not None:
+                    self._progress_start = self._progress_start.replace(tzinfo=sample_dt.tzinfo)
+                if self._progress_end.tzinfo is None and sample_dt.tzinfo is not None:
+                    self._progress_end = self._progress_end.replace(tzinfo=sample_dt.tzinfo)
+            # Use the broker-provided backtest data source (created by the engine) to avoid duplicate connections
+            ds = getattr(self.broker, "data_source", None)
+            if ds is None:
+                raise RuntimeError("Backtest broker did not provide a data_source; expected engine to supply one.")
+            self.portfolio_data_source = ds
+            self.debug_logs_enabled = debug_logs
+            self._iteration_counter = 0
+
             self.portfolio_manager = PortfolioManager(
                 strategies_folder="custom_portfolio/strategies/active_strategies",
                 broker=self.broker,
                 calendar=self.trading_calendar if hasattr(self, "trading_calendar") else None,
+                data_source=self.portfolio_data_source,
                 auto_load=True,
                 cache_ttl_seconds=3600,  # 1 hour for backtesting (prevents cache expiry during slow backtests)
                 min_order_delay_seconds=2.0,
                 default_atr_period=20,
+                enable_snapshots=enable_snapshots,
+                max_snapshots=max_snapshots,
+                timestep=timestep,
+                simulate_fills=simulate_fills,
+                shared_initial_capital=shared_initial_capital,
             )
 
             # Print validation report
@@ -324,41 +412,115 @@ def run_backtest(args):
                 print(TF.table(headers, rows))
 
             # Prefetch all data upfront to avoid lazy loading during backtest
-            if hasattr(self.broker, "data_source"):
+            if summary_df.empty:
+                if self.debug_logs_enabled:
+                    print("[DEBUG] No strategies/symbols loaded; skipping prefetch.")
+            if hasattr(self, "portfolio_data_source") and not summary_df.empty:
                 from custom_portfolio.tools.terminal_formatter import TerminalFormatter as TF
+                from lumibot.entities import Asset
 
                 symbols = summary_df["symbol"].unique().tolist()
                 symbols_str = ", ".join(symbols)
                 print("")
-                print(f"Prefetching data for {len(symbols)} symbols: {symbols_str}")
-
-                from lumibot.entities import Asset
+                if self.debug_logs_enabled:
+                    print(
+                        f"[DEBUG] Prefetch starting for {len(symbols)} symbols "
+                        f"({symbols_str}) | window {backtesting_start} -> {backtesting_end}"
+                    )
+                start_prefetch = time.perf_counter()
 
                 assets = [Asset(symbol, asset_type=Asset.AssetType.CONT_FUTURE) for symbol in symbols]
 
-                if hasattr(self.broker.data_source, "prefetch_data"):
-                    self.broker.data_source.prefetch_data(assets, timestep="minute")
-                    print(TF.success("Data prefetch complete"))
+                if hasattr(self.portfolio_data_source, "initialize_data_for_backtest"):
+                    self.portfolio_data_source.initialize_data_for_backtest(assets, timestep="minute")
+                    elapsed = time.perf_counter() - start_prefetch
+                    print(
+                        TF.success(
+                            f"Data initialized for backtest (prefetch) in {elapsed:.2f}s for {len(symbols)} symbols"
+                        )
+                    )
+                elif hasattr(self.portfolio_data_source, "prefetch_data"):
+                    self.portfolio_data_source.prefetch_data(assets, timestep="minute")
+                    elapsed = time.perf_counter() - start_prefetch
+                    print(
+                        TF.success(
+                            f"Data prefetch complete in {elapsed:.2f}s for {len(symbols)} symbols"
+                        )
+                    )
+                # TODO: allow timestep override beyond 'minute' if multi-timeframe support is added later
 
             self.sleeptime = "1M"  # 1-minute bars
+
+            # Store manager for export after backtest
+            PortfolioStrategy._last_manager = self.portfolio_manager
+
+        def _log_progress_debug(self, current_time: datetime):
+            """Emit a derived progress percentage for debugging."""
+            if not self.debug_logs_enabled:
+                return
+            # Throttle progress debug to every 50 iterations to avoid I/O slowdown
+            if self._iteration_counter % 50 != 1:
+                return
+            try:
+                start_dt = self._progress_start
+                end_dt = self._progress_end
+                ct = current_time
+                if ct.tzinfo is not None and start_dt.tzinfo is None:
+                    start_dt = start_dt.replace(tzinfo=ct.tzinfo)
+                    end_dt = end_dt.replace(tzinfo=ct.tzinfo) if end_dt.tzinfo is None else end_dt
+                elif ct.tzinfo is None and start_dt.tzinfo is not None:
+                    ct = ct.replace(tzinfo=start_dt.tzinfo)
+                elif ct.tzinfo is not None and start_dt.tzinfo is not None and ct.tzinfo != start_dt.tzinfo:
+                    start_dt = start_dt.astimezone(ct.tzinfo)
+                    end_dt = end_dt.astimezone(ct.tzinfo)
+                span = (end_dt - start_dt).total_seconds()
+                elapsed = (ct - start_dt).total_seconds()
+                pct = max(0.0, min(100.0, (elapsed / span) * 100 if span > 0 else 100.0))
+                print(f"[DEBUG] Progress (calculated): {pct:.2f}%")
+            except Exception:
+                pass
 
         def on_trading_iteration(self):
             """Run one trading iteration."""
             current_time = self.get_datetime()
+            self._iteration_counter += 1
+            if self.debug_logs_enabled:
+                print(f"[DEBUG] Iteration {self._iteration_counter} at {current_time.isoformat()}", flush=True)
+                self._log_progress_debug(current_time)
+            # Heartbeat every 25 iterations so we can see forward progress even with quiet logs
+            if self._iteration_counter % 25 == 0:
+                start_dt = self._progress_start
+                end_dt = self._progress_end if hasattr(self, "_progress_end") else None
+                ct = current_time
+                if end_dt is not None:
+                    if ct.tzinfo is not None and start_dt.tzinfo is None:
+                        start_dt = start_dt.replace(tzinfo=ct.tzinfo)
+                        end_dt = end_dt.replace(tzinfo=ct.tzinfo) if end_dt.tzinfo is None else end_dt
+                    elif ct.tzinfo is None and start_dt.tzinfo is not None:
+                        ct = ct.replace(tzinfo=start_dt.tzinfo)
+                    elif ct.tzinfo is not None and start_dt.tzinfo is not None and ct.tzinfo != start_dt.tzinfo:
+                        start_dt = start_dt.astimezone(ct.tzinfo)
+                        end_dt = end_dt.astimezone(ct.tzinfo)
+                span = (end_dt - start_dt).total_seconds() if end_dt else 0
+                if span > 0:
+                    elapsed = (ct - start_dt).total_seconds()
+                    pct = max(0.0, min(100.0, (elapsed / span) * 100))
+                    print(
+                        f"[INFO] Heartbeat: iteration {self._iteration_counter} at {current_time.isoformat()} "
+                        f"(calc progress {pct:.2f}%)",
+                        flush=True,
+                    )
             self.portfolio_manager.run_iteration(current_time)
+            if self.debug_logs_enabled:
+                print(f"[DEBUG] Iteration {self._iteration_counter} completed at {datetime.now().isoformat()}", flush=True)
 
         def on_abrupt_closing(self):
             """Handle abrupt closing."""
             print("\nBacktest interrupted")
 
         def trace_stats(self, context, snapshot_before):
-            """Generate performance statistics."""
-            # Get performance report from portfolio manager
-            if hasattr(self, "portfolio_manager"):
-                report = self.portfolio_manager.get_performance_report()
-                if report is not None:
-                    print("\nPortfolio Performance Report:")
-                    print(report)
+            """Silence per-iteration stats to avoid I/O overhead; let final results handle reporting."""
+            return {"report": None}
 
     # Set up backtesting
     backtesting_start = datetime.strptime(start_date_str, "%Y-%m-%d")
@@ -366,14 +528,41 @@ def run_backtest(args):
 
     # Run backtest using class method (broker configured before initialize())
     # Uses DataBento for futures data (credentials read from .env file)
-    results = PortfolioStrategy.backtest(
-        datasource_class=DataBentoDataBacktesting,
-        backtesting_start=backtesting_start,
-        backtesting_end=backtesting_end,
-        parameters={},
-        buy_trading_fees=[TradingFee(flat_fee=0.75)],  # $0.75 per trade for futures
-        sell_trading_fees=[TradingFee(flat_fee=0.75)],
-    )
+    try:
+        results = PortfolioStrategy.backtest(
+            datasource_class=DataBentoDataBacktestingPandas,
+            backtesting_start=backtesting_start,
+            backtesting_end=backtesting_end,
+            parameters={},
+            buy_trading_fees=[TradingFee(flat_fee=0.75)],  # $0.75 per trade for futures
+            sell_trading_fees=[TradingFee(flat_fee=0.75)],
+            show_plot=show_plot,
+            show_tearsheet=show_tearsheet,
+            show_indicators=show_indicators,
+            save_tearsheet=False,
+            show_progress_bar=True,
+        )
+    except (Exception,) as e:
+        import numpy.linalg
+
+        # If visualization fails (e.g., KDE on empty returns), retry once without plots/tearsheet to finish the run
+        if isinstance(e, numpy.linalg.LinAlgError):
+            print(f"[WARN] Visualization failed ({e}); retrying without plots/tearsheet.")
+            results = PortfolioStrategy.backtest(
+                datasource_class=DataBentoDataBacktestingPandas,
+                backtesting_start=backtesting_start,
+                backtesting_end=backtesting_end,
+                parameters={},
+                buy_trading_fees=[TradingFee(flat_fee=0.75)],
+                sell_trading_fees=[TradingFee(flat_fee=0.75)],
+                show_plot=False,
+                show_tearsheet=False,
+                show_indicators=False,
+                save_tearsheet=False,
+                show_progress_bar=True,
+            )
+        else:
+            raise
 
     print("\n" + "=" * 70)
     print("BACKTEST COMPLETE")
@@ -381,12 +570,34 @@ def run_backtest(args):
 
     # Display results
     if results:
+        def _fmt_pct(val):
+            try:
+                return f"{float(val):.2%}"
+            except Exception:
+                return str(val)
+
+        def _fmt_num(val):
+            try:
+                return f"{float(val):.2f}"
+            except Exception:
+                return str(val)
+
         print("\nBacktest Results:")
-        print(f"Total Return: {results.get('total_return', 0):.2%}")
-        print(f"CAGR: {results.get('cagr', 0):.2%}")
-        print(f"Max Drawdown: {results.get('max_drawdown', 0):.2%}")
-        print(f"Sharpe Ratio: {results.get('sharpe_ratio', 0):.2f}")
+        print(f"Total Return: {_fmt_pct(results.get('total_return', 0))}")
+        print(f"CAGR: {_fmt_pct(results.get('cagr', 0))}")
+        print(f"Max Drawdown: {_fmt_pct(results.get('max_drawdown', 0))}")
+        print(f"Sharpe Ratio: {_fmt_num(results.get('sharpe_ratio', 0))}")
         print(f"Total Trades: {results.get('total_trades', 0)}")
+
+    # Export snapshots if enabled
+    manager = PortfolioStrategy._last_manager
+    if manager:
+        if enable_snapshots and max_snapshots > 0:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            folder = Path("snapshots") / f"backtest_{stamp}"
+            out_path = manager.export_snapshots(folder)
+            if out_path:
+                print(f"\nSnapshot log written to {out_path}")
 
 
 def run_live(args):
@@ -401,6 +612,9 @@ def run_live(args):
     print("=" * 70)
     print("⚠️  LIVE TRADING MODE - REAL ORDERS WILL BE PLACED")
     print("")
+    enable_snapshots, max_snapshots, timestep = _snapshot_config()
+    simulate_fills = _simulate_fills_config()
+    shared_initial_capital = _capital_config()
 
     # Confirmation prompt
     confirm = input("Are you sure you want to run in LIVE mode? (yes/no): ")
@@ -433,6 +647,11 @@ def run_live(args):
         cache_ttl_seconds=60,
         min_order_delay_seconds=2.0,
         default_atr_period=20,
+        enable_snapshots=enable_snapshots,
+        max_snapshots=max_snapshots,
+        timestep=timestep,
+        simulate_fills=simulate_fills,
+        shared_initial_capital=shared_initial_capital,
     )
 
     # Print validation report
@@ -494,6 +713,9 @@ def validate_only(args):
         args: Command line arguments
     """
     from custom_portfolio.tools.terminal_formatter import TerminalFormatter as TF
+    enable_snapshots, max_snapshots, timestep = _snapshot_config()
+    simulate_fills = _simulate_fills_config()
+    shared_initial_capital = _capital_config()
 
     # Create a minimal portfolio manager for validation
     portfolio_manager = PortfolioManager(
@@ -501,6 +723,11 @@ def validate_only(args):
         broker=None,  # Not needed for validation
         calendar=None,  # Not needed for validation
         auto_load=True,
+        enable_snapshots=enable_snapshots,
+        max_snapshots=max_snapshots,
+        timestep=timestep,
+        simulate_fills=simulate_fills,
+        shared_initial_capital=shared_initial_capital,
     )
 
     # Print validation report (includes all formatting and final status)

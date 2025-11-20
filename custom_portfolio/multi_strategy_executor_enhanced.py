@@ -30,6 +30,7 @@ Date: 2025-11-18 (Enhanced Version)
 """
 
 import logging
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -40,6 +41,9 @@ from custom_portfolio.tools.shared_data_manager import SharedDataManager
 from custom_portfolio.tools.strategy_attribution import StrategyAttribution
 from custom_portfolio.tools.strategy_state import StrategyState
 from lumibot.entities import Asset, Order
+
+_YELLOW = "\x1b[33m"
+_RESET = "\x1b[0m"
 
 
 class EnhancedStrategyState(StrategyState):
@@ -54,6 +58,10 @@ class EnhancedStrategyState(StrategyState):
         # ATR caching for bracket orders
         self.last_atr: Optional[float] = None
         self.last_atr_time: Optional[datetime] = None
+
+        # Simple realized P&L tracking and trade counts (per fill)
+        self.realized_pnl: float = 0.0
+        self.trade_count: int = 0
 
 
 class MultiStrategyExecutorEnhanced:
@@ -159,6 +167,11 @@ class MultiStrategyExecutorEnhanced:
         cache_ttl_seconds: int = 60,
         min_order_delay_seconds: float = 2.0,
         default_atr_period: int = 20,
+        enable_snapshots: bool = True,
+        simulate_fills: bool = True,
+        max_snapshots: int = 200000,
+        timestep: str = "minute",
+        shared_initial_capital: float = 150000.0,
     ):
         """
         Initialize the enhanced MultiStrategyExecutor.
@@ -179,14 +192,21 @@ class MultiStrategyExecutorEnhanced:
         self.data_source = data_source
         self.calendar = calendar
         self.default_atr_period = default_atr_period
+        self.MIN_LOOKBACK_FLOOR = 100
+        self.MAX_LOOKBACK_CAP = 400
+        self.timestep = timestep
 
         # Initialize shared resources
         self.shared_data = SharedDataManager(data_source, cache_ttl_seconds)
         self.rate_limiter = GlobalRateLimiter(min_order_delay_seconds)
-        self.attribution = StrategyAttribution()
+        self.attribution = StrategyAttribution(max_snapshots=max_snapshots)
+        self.shared_initial_capital = shared_initial_capital
 
         # Dictionary to hold loaded strategy modules for dynamic loading
         self.strategy_modules = {}
+
+        # Pre-compute shared lookback window (cap at 400 by requirement)
+        self.max_lookback = 0
 
         # Create enhanced strategy states
         self.strategies: List[EnhancedStrategyState] = []
@@ -206,8 +226,26 @@ class MultiStrategyExecutorEnhanced:
 
             # Register with attribution tracker
             self.attribution.register_strategy(
-                config["strategy_id"], initial_capital=config.get("initial_capital", 0.0)
+                config["strategy_id"], initial_capital=self.shared_initial_capital
             )
+
+            # Track required lookback (include common indicators)
+            p = state.params
+            required = max(
+                int(p.get("atr_period", self.default_atr_period)) + 10,
+                int(p.get("rsi_period", 0)) + 2,
+                int(p.get("sma_period", 0)) + 2,
+                int(p.get("lookback", 0)),
+                1,
+            )
+            self.max_lookback = max(self.max_lookback, required)
+
+        # Cap lookback to 400 bars as requested; ensure minimum 100 for stability
+        self.max_lookback = min(self.MAX_LOOKBACK_CAP, max(self.max_lookback, self.MIN_LOOKBACK_FLOOR))
+
+        # Snapshot toggles
+        self.enable_snapshots = enable_snapshots
+        self.simulate_fills = simulate_fills
 
         # Logger
         self.logger = logging.getLogger(__name__)
@@ -367,10 +405,15 @@ class MultiStrategyExecutorEnhanced:
         """
         if current_time is None:
             current_time = datetime.now()
+        iter_start = time.perf_counter()
 
         self.iteration_count += 1
 
-        self.logger.info(f"=== Enhanced Multi-Strategy Iteration #{self.iteration_count} at {current_time} ===")
+        if self.shared_data.data_source is None:
+            self.logger.error("No data_source configured; cannot run iteration.")
+            return {"error": "data_source_missing"}
+
+        self.logger.info(f"{_YELLOW}=== Enhanced Multi-Strategy Iteration #{self.iteration_count} at {current_time} ==={_RESET}")
 
         # Statistics for this iteration
         strategies_processed = 0
@@ -383,22 +426,33 @@ class MultiStrategyExecutorEnhanced:
         self.logger.debug(f"Fetching data for {len(symbols)} unique symbols: {symbols}")
 
         # Fetch with enough history for ATR calculations
-        max_lookback = max(
-            strategy.params.get("atr_period", self.default_atr_period) + 10 for strategy in self.strategies
+        self.logger.info(
+            f"{_YELLOW}[FETCH] start symbols={symbols} length={self.max_lookback} timestep={self.timestep}{_RESET}"
         )
-
+        fetch_start = time.perf_counter()
         self.shared_data.fetch_for_all_strategies(
             symbols=symbols,
-            length=max_lookback,
-            timestep="1M",  # 1-minute bars
+            length=self.max_lookback,
+            timestep=self.timestep,
             asset_type=Asset.AssetType.CONT_FUTURE,
+        )
+        self.logger.info(
+            f"{_YELLOW}[FETCH] done in {time.perf_counter() - fetch_start:.2f}s "
+            f"cache_stats={self.shared_data.get_cache_stats()}{_RESET}"
         )
 
         # Step 2: Process each strategy independently
         for strategy_state in self.strategies:
             try:
+                per_strategy_start = time.perf_counter()
                 # 2a. Get cached data (no API call)
-                market_data = self.shared_data.get_cached_data(strategy_state.symbol, max_lookback, "1M")
+                self.logger.info(
+                    f"{_YELLOW}[DATA] get_cached_data for {strategy_state.strategy_id} "
+                    f"symbol={strategy_state.symbol} len={self.max_lookback} ts={self.timestep}{_RESET}"
+                )
+                market_data = self.shared_data.get_cached_data(
+                    strategy_state.symbol, self.max_lookback, self.timestep
+                )
 
                 if market_data is None:
                     self.logger.warning(
@@ -411,6 +465,11 @@ class MultiStrategyExecutorEnhanced:
                     df = market_data.df
                 else:
                     df = market_data
+
+                self.logger.info(
+                    f"{_YELLOW}[PROCESS] {strategy_state.strategy_id} using "
+                    f"{len(df) if hasattr(df,'__len__') else 'NA'} rows{_RESET}"
+                )
 
                 # 2b. Check for time-based exit FIRST (before new signals)
                 virtual_pos = strategy_state.tracker.get_position(strategy_state.symbol)
@@ -476,17 +535,28 @@ class MultiStrategyExecutorEnhanced:
                     order = self._create_bracket_order_for_strategy(strategy_state, signal, df)
                     if order:
                         orders_to_submit.append((strategy_state, order, False, "entry"))
+                self.logger.info(
+                    f"{_YELLOW}[PROCESS] {strategy_state.strategy_id} done in "
+                    f"{time.perf_counter() - per_strategy_start:.4f}s virt_qty={virtual_qty}{_RESET}"
+                )
 
             except Exception as e:
                 self.logger.error(f"Error processing strategy {strategy_state.strategy_id}: {e}", exc_info=True)
                 continue
 
         # Step 3: Execute all orders sequentially with rate limiting
+        self.logger.info(f"{_YELLOW}[FLOW] before_execute orders_to_submit={len(orders_to_submit)}{_RESET}")
         orders_submitted = self._execute_all_orders(orders_to_submit, current_time)
+        self.logger.info(f"{_YELLOW}[FLOW] after_execute orders_submitted={orders_submitted}{_RESET}")
 
         # Step 4: Log iteration summary
+        self.logger.info(f"{_YELLOW}[FLOW] cache_stats_start{_RESET}")
         cache_stats = self.shared_data.get_cache_stats()
+        self.logger.info(f"{_YELLOW}[FLOW] cache_stats_end{_RESET}")
+
+        self.logger.info(f"{_YELLOW}[FLOW] rate_limiter_stats_start{_RESET}")
         rate_limiter_stats = self.rate_limiter.get_stats()
+        self.logger.info(f"{_YELLOW}[FLOW] rate_limiter_stats_end{_RESET}")
 
         summary = {
             "iteration": self.iteration_count,
@@ -500,9 +570,14 @@ class MultiStrategyExecutorEnhanced:
         }
 
         self.logger.info(
-            f"Iteration complete: {strategies_processed} strategies processed, "
+            f"{_YELLOW}Iteration complete: {strategies_processed} strategies processed, "
             f"{signals_generated} signals, {time_exits_triggered} time exits, "
-            f"{orders_submitted} orders, cache hit rate: {cache_stats['hit_rate']:.1f}%"
+            f"{orders_submitted} orders, cache hit rate: {cache_stats['hit_rate']:.1f}%{_RESET}"
+        )
+        self.logger.info(f"{_YELLOW}[FLOW] iteration_summary_logged{_RESET}")
+        self.logger.info(
+            f"{_YELLOW}[FLOW] iteration_duration={time.perf_counter() - iter_start:.4f}s "
+            f"orders={orders_submitted} cache_hit_rate={cache_stats['hit_rate']:.1f}%{_RESET}"
         )
 
         return summary
@@ -634,20 +709,33 @@ class MultiStrategyExecutorEnhanced:
                         f"submitting order for {strategy_state.strategy_id}"
                     )
 
-                # Submit order to broker
-                self.logger.info(
-                    f"Submitting order for {strategy_state.strategy_id} ({reason}): "
-                    f"{order.side} {order.quantity} {order.asset.symbol}"
-                )
-
-                self.broker.submit_order(order)
-
-                # Mark order as submitted for rate limiting
-                self.rate_limiter.mark_order_submitted()
+                # Submit order to broker unless simulating fills or broker missing
+                mark_submitted = False
+                if not self.simulate_fills and self.broker is not None:
+                    self.logger.info(
+                        f"Submitting order for {strategy_state.strategy_id} ({reason}): "
+                        f"{order.side} {order.quantity} {order.asset.symbol}"
+                    )
+                    try:
+                        self.broker.submit_order(order)
+                        mark_submitted = True
+                    except Exception as submit_err:
+                        self.logger.error(
+                            f"Broker submit failed for {strategy_state.strategy_id}: {submit_err}", exc_info=True
+                        )
+                else:
+                    # Simulated path just logs
+                    self.logger.debug(
+                        f"Simulated submit for {strategy_state.strategy_id} ({reason}): "
+                        f"{order.side} {order.quantity} {order.asset.symbol}"
+                    )
+                    mark_submitted = True
+                if mark_submitted:
+                    self.rate_limiter.mark_order_submitted()
 
                 # Update virtual position immediately (assume market orders fill)
                 # Get current price from cached data
-                market_data = self.shared_data.get_cached_data(strategy_state.symbol, 100, "1M")
+                market_data = self.shared_data.get_cached_data(strategy_state.symbol, 100, self.timestep)
 
                 if market_data is not None:
                     if hasattr(market_data, "df"):
@@ -655,21 +743,48 @@ class MultiStrategyExecutorEnhanced:
                     else:
                         df = market_data
 
+                    if df is None:
+                        self.logger.warning(
+                            f"No market data frame for {strategy_state.strategy_id}; skipping fill update."
+                        )
+                        continue
+
+                    if len(df) == 0:
+                        self.logger.warning(
+                            f"Empty market data when executing order for {strategy_state.strategy_id}; skipping fill update."
+                        )
+                        continue
+
                     # Assume fill at last close price
                     current_price = float(df["close"].iloc[-1])
+                    if len(df.index) > 0:
+                        bar_time = df.index[-1]
+                    else:
+                        # Fallback to current iteration time if index missing
+                        bar_time = current_time
 
+                    # Simulated virtual fill
                     strategy_state.tracker.execute_order(
                         strategy_state.symbol, order.quantity, order.side, current_price
                     )
+                    strategy_state.trade_count += 1
 
                     # Track entry time and price for new positions
                     if not is_close and reason == "entry":
-                        strategy_state.entry_time = current_time
+                        strategy_state.entry_time = bar_time
                         strategy_state.entry_price = current_price
                         strategy_state.bars_in_trade = 0
 
-                    # Clear entry tracking for closes
+                    # Clear entry tracking for closes and realize P&L
                     if is_close:
+                        if strategy_state.entry_price is not None:
+                            qty_closed = order.quantity
+                            if order.side == "sell":  # closing long
+                                realized = (current_price - strategy_state.entry_price) * qty_closed
+                            else:  # buy to cover short
+                                realized = (strategy_state.entry_price - current_price) * qty_closed
+                            strategy_state.realized_pnl += realized
+                        strategy_state.trade_count += 1
                         strategy_state.entry_time = None
                         strategy_state.entry_price = None
                         strategy_state.bars_in_trade = 0
@@ -678,9 +793,35 @@ class MultiStrategyExecutorEnhanced:
                         f"Updated virtual position for {strategy_state.strategy_id}: "
                         f"{strategy_state.tracker.get_position(strategy_state.symbol)}"
                     )
+                    orders_submitted += 1
+                    self.total_orders_submitted += 1
 
-                orders_submitted += 1
-                self.total_orders_submitted += 1
+                    # Snapshots for attribution/logging (optional)
+                    if self.enable_snapshots:
+                        pos_obj = strategy_state.tracker.get_position(strategy_state.symbol)
+                        pos_qty = pos_obj.quantity if pos_obj else 0.0
+                        entry_price = strategy_state.entry_price
+                        last_price = current_price
+                        unrealized = (last_price - entry_price) * pos_qty if entry_price is not None else 0.0
+                        self.attribution.record_snapshot(
+                            strategy_state.strategy_id,
+                            {
+                                "timestamp": bar_time,
+                                "symbol": strategy_state.symbol,
+                                "position_qty": pos_qty,
+                                "notional_exposure": pos_qty * last_price,
+                                "last_price": last_price,
+                                "entry_price": entry_price,
+                                "bars_in_trade": strategy_state.bars_in_trade,
+                                "last_signal": getattr(strategy_state, "last_signal", None),
+                                "unrealized_pnl": unrealized,
+                                "realized_pnl": strategy_state.realized_pnl,
+                                "trade_count": strategy_state.trade_count,
+                            },
+                        )
+                else:
+                    # No data; skip counting as submitted
+                    continue
 
             except Exception as e:
                 self.logger.error(f"Failed to execute order for {strategy_state.strategy_id}: {e}", exc_info=True)

@@ -110,11 +110,37 @@ class SharedDataManager:
         Returns:
             True if cache is valid (not expired), False otherwise
         """
+        # Fast path: if we already have the data cached, reuse it (expected in backtests)
+        if cache_key in self.cache:
+            return True
+
+        # Otherwise, fall back to TTL check for any future extensions/live reuse
         if cache_key not in self.last_fetch:
             return False
 
         age = time.time() - self.last_fetch[cache_key]
         return age < self.cache_ttl_seconds
+
+    def _prefetched_index_by_symbol(self):
+        """
+        Build a dict mapping symbol -> prefetched data object from the datasource store.
+        Returns empty dict if no datasource store is available.
+        """
+        ds = getattr(self, "data_source", None)
+        store = getattr(ds, "pandas_data", None)
+        if not store or not isinstance(store, dict):
+            return {}
+
+        index = {}
+        for key, data_obj in store.items():
+            try:
+                asset = key[0] if isinstance(key, tuple) else key
+                symbol = getattr(asset, "symbol", None)
+                if symbol:
+                    index[symbol] = data_obj
+            except Exception:
+                continue
+        return index
 
     def fetch_for_all_strategies(
         self, symbols: List[str], length: int, timestep: str, asset_type: str = Asset.AssetType.CONT_FUTURE
@@ -137,41 +163,143 @@ class SharedDataManager:
             >>> # Only fetches data for ES and NQ (deduplicates ES)
             >>> # Subsequent calls within 60 seconds use cache
         """
-        with self.lock:
-            # Deduplicate symbols
-            unique_symbols = list(set(symbols))
+        fetch_start = time.perf_counter()
+        debug_enabled = self.logger.isEnabledFor(logging.DEBUG)
+        self.logger.info(
+            f"[SDM] fetch_for_all_strategies start symbols={symbols} length={length} timestep={timestep} asset_type={asset_type}"
+        )
+        phase1_start = time.perf_counter()
+        to_fetch = []
+        unique_symbols: List[str] = []
+        all_cached_flag = False
+        try:
+            # Phase 1 (under lock): determine which symbols need fetching and fill from prefetched store
+            self.logger.info("[SDM] acquiring lock for phase1")
+            lock_wait_start = time.perf_counter()
+            with self.lock:
+                self.logger.info(
+                    f"[SDM] lock acquired in {time.perf_counter() - lock_wait_start:.6f}s"
+                )
+                unique_symbols = list(set(symbols))
+                if debug_enabled:
+                    self.logger.debug(f"[SDM] phase1 unique_symbols={unique_symbols}")
+                prefetched_index = self._prefetched_index_by_symbol()
+                if debug_enabled:
+                    self.logger.debug(f"[SDM] prefetched_index keys={list(prefetched_index.keys())}")
 
-            for symbol in unique_symbols:
-                cache_key = self._create_cache_key(symbol, length, timestep)
+                # If everything is already cached, count as hits and return
+                all_cached = True
+                for symbol in unique_symbols:
+                    cache_key = self._create_cache_key(symbol, length, timestep)
+                    if debug_enabled:
+                        self.logger.debug(f"[SDM] evaluating symbol={symbol} cache_key={cache_key}")
 
-                # Check if cache is valid
-                if self._is_cache_valid(cache_key):
-                    self.cache_hits += 1
-                    self.logger.debug(
-                        f"Cache hit for {cache_key} (age: {self.get_cache_age(symbol, length, timestep):.1f}s)"
-                    )
-                    continue
+                    if self._is_cache_valid(cache_key):
+                        self.cache_hits += 1
+                        if debug_enabled:
+                            self.logger.debug(
+                                f"[SDM] cache hit {cache_key} age={self.get_cache_age(symbol, length, timestep):.4f}s"
+                            )
+                        continue
 
-                # Cache miss - fetch from API
-                self.cache_misses += 1
-                self.logger.debug(f"Cache miss for {cache_key} - fetching from API")
+                    all_cached = False
+                    prefetched = prefetched_index.get(symbol)
+                    if prefetched is not None:
+                        self.cache[cache_key] = prefetched
+                        self.last_fetch[cache_key] = time.time()
+                        self.total_fetches += 1
+                        self.logger.info(f"[SDM] Cached prefetched data for {cache_key}")
+                        continue
 
+                    self.cache_misses += 1
+                    to_fetch.append((symbol, cache_key))
+                    if debug_enabled:
+                        self.logger.debug(f"[SDM] marked for fetch symbol={symbol} cache_key={cache_key}")
+
+                self.logger.info(
+                    f"[SDM] phase1 complete all_cached={all_cached} to_fetch={to_fetch} "
+                    f"duration={time.perf_counter() - phase1_start:.6f}s"
+                )
+
+                if all_cached and not to_fetch:
+                    all_cached_flag = True
+        finally:
+            if debug_enabled:
+                self.logger.debug(
+                    f"[SDM] phase1 exit unique_symbols={unique_symbols} to_fetch={to_fetch}"
+                )
+
+        if all_cached_flag and not to_fetch:
+            self.logger.info(
+                f"[SDM] all_cached fast-exit duration={time.perf_counter() - fetch_start:.4f}s "
+                f"cache_stats={self.get_cache_stats()}"
+            )
+            return
+
+        # Phase 2 (outside lock): try datasource store, then perform API fetches only if needed
+        # Build a fast index of datasource store once
+        store_index = {}
+        store = getattr(self.data_source, "pandas_data", None)
+        if store and isinstance(store, dict):
+            for key, data_obj in store.items():
                 try:
-                    # Create asset and fetch data
-                    asset = Asset(symbol, asset_type=asset_type)
-                    data = self.data_source.get_historical_prices(asset, length, timestep)
-
-                    # Store in cache
-                    self.cache[cache_key] = data
-                    self.last_fetch[cache_key] = time.time()
-                    self.total_fetches += 1
-
-                    self.logger.debug(f"Cached data for {cache_key}")
-
-                except Exception as e:
-                    self.logger.error(f"Failed to fetch data for {symbol}: {e}")
-                    # Don't cache failures
+                    asset = key[0] if isinstance(key, tuple) else key
+                    symbol = getattr(asset, "symbol", None)
+                    if symbol:
+                        store_index[symbol] = data_obj
+                except Exception:
                     continue
+        if debug_enabled:
+            self.logger.debug(f"[SDM] phase2 store_index keys={list(store_index.keys())} from datasource")
+
+        for symbol, cache_key in to_fetch:
+            per_symbol_start = time.perf_counter()
+            # Try grabbing from datasource store directly to avoid API
+            data_obj = store_index.get(symbol)
+            if data_obj is not None:
+                now_ts = time.time()
+                with self.lock:
+                    self.cache[cache_key] = data_obj
+                    self.last_fetch[cache_key] = now_ts
+                    self.total_fetches += 1
+                self.logger.debug(
+                    f"[SDM] Cached datasource store data for {cache_key} "
+                    f"duration={time.perf_counter() - per_symbol_start:.6f}s"
+                )
+                continue
+
+            # If still not cached, fall back to API
+            with self.lock:
+                already_cached = cache_key in self.cache
+            if already_cached:
+                self.logger.debug(
+                    f"[SDM] Skipping API fetch for {cache_key}; already cached after store check "
+                    f"duration={time.perf_counter() - per_symbol_start:.6f}s"
+                )
+                continue
+
+            self.logger.info(f"[SDM] No prefetched/store data for {symbol}; fetching from API")
+            try:
+                asset = Asset(symbol, asset_type=asset_type)
+                data = self.data_source.get_historical_prices(asset, length, timestep)
+                now_ts = time.time()
+                # Store result under lock
+                with self.lock:
+                    self.cache[cache_key] = data
+                    self.last_fetch[cache_key] = now_ts
+                    self.total_fetches += 1
+                self.logger.debug(
+                    f"[SDM] Cached data for {cache_key} "
+                    f"duration={time.perf_counter() - per_symbol_start:.6f}s"
+                )
+            except Exception as e:
+                self.logger.error(f"Failed to fetch data for {symbol}: {e}")
+                continue
+
+        self.logger.info(
+            f"[SDM] fetch_for_all_strategies done in {time.perf_counter() - fetch_start:.4f}s "
+            f"cache_stats={self.get_cache_stats()}"
+        )
 
     def get_cached_data(self, symbol: str, length: int, timestep: str):
         """

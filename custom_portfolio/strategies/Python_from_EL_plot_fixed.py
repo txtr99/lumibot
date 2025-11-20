@@ -823,10 +823,10 @@ if __name__ == "__main__":
             parameters=params,
             budget=100000,
             # Add the four required parameters
-            show_plot=False,
-            show_tearsheet=False,
+            show_plot=True,
+            show_tearsheet=True,
             save_tearsheet=False,
-            show_indicators=False,
+            show_indicators=True,
         )
 
         # Export data to CSV and create plots after backtest completes
