@@ -41,10 +41,15 @@ class VirtualPosition:
         return abs(self.quantity)
 
     def calculate_pnl(self, current_price: float) -> float:
-        """Calculate unrealized P&L based on current price."""
+        """Calculate unrealized P&L based on current price (includes multiplier when available)."""
         if self.quantity == 0:
             return 0.0
-        return self.quantity * (current_price - self.avg_entry_price)
+        try:
+            from custom_portfolio.data.futures_metadata import get_multiplier
+            multiplier = get_multiplier(self.symbol)
+        except Exception:
+            multiplier = 1.0
+        return self.quantity * (current_price - self.avg_entry_price) * multiplier
 
 
 class VirtualPositionTracker:

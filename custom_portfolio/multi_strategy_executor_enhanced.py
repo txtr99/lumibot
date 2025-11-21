@@ -40,6 +40,8 @@ from custom_portfolio.tools.global_rate_limiter import GlobalRateLimiter
 from custom_portfolio.tools.shared_data_manager import SharedDataManager
 from custom_portfolio.tools.strategy_attribution import StrategyAttribution
 from custom_portfolio.tools.strategy_state import StrategyState
+from custom_portfolio.data.topstep_fee_table import get_per_order_fee
+from custom_portfolio.data.futures_metadata import get_multiplier
 from lumibot.entities import Asset, Order
 
 _YELLOW = "\x1b[33m"
@@ -68,6 +70,8 @@ class EnhancedStrategyState(StrategyState):
         # Simple realized P&L tracking and trade counts (per fill)
         self.realized_pnl: float = 0.0
         self.trade_count: int = 0
+        self.total_fees_paid: float = 0.0
+        self.fees_since_entry: float = 0.0
 
 
 class MultiStrategyExecutorEnhanced:
@@ -180,6 +184,7 @@ class MultiStrategyExecutorEnhanced:
         shared_initial_capital: float = 150000.0,
         ignore_calendar: bool = False,
         broker_strategy_name: Optional[str] = None,
+        deep_portfolio_debug: bool = False,
     ):
         """
         Initialize the enhanced MultiStrategyExecutor.
@@ -194,6 +199,7 @@ class MultiStrategyExecutorEnhanced:
             default_atr_period: Default ATR period if not specified (default: 20)
             ignore_calendar: If True, skip calendar/session gating (useful for backtests)
             broker_strategy_name: Optional wrapper strategy name to tag real broker orders
+            deep_portfolio_debug: Emit verbose per-iteration logs when True
 
         Note:
             Tick sizes are now automatically looked up per symbol from futures_metadata
@@ -213,6 +219,9 @@ class MultiStrategyExecutorEnhanced:
         self.shared_initial_capital = shared_initial_capital
         self.ignore_calendar = ignore_calendar
         self.broker_strategy_name = broker_strategy_name
+        self.deep_portfolio_debug = deep_portfolio_debug
+        self.total_initial_capital = shared_initial_capital
+        self.fill_price_mode = "close"
 
         # Dictionary to hold loaded strategy modules for dynamic loading
         self.strategy_modules = {}
@@ -222,6 +231,9 @@ class MultiStrategyExecutorEnhanced:
 
         # Create enhanced strategy states
         self.strategies: List[EnhancedStrategyState] = []
+        self.strategy_count = max(1, len(strategy_configs))
+        per_strategy_capital = shared_initial_capital / self.strategy_count if self.strategy_count else shared_initial_capital
+
         for config in strategy_configs:
             state = EnhancedStrategyState(
                 strategy_id=config["strategy_id"],
@@ -238,7 +250,7 @@ class MultiStrategyExecutorEnhanced:
 
             # Register with attribution tracker
             self.attribution.register_strategy(
-                config["strategy_id"], initial_capital=self.shared_initial_capital
+                config["strategy_id"], initial_capital=per_strategy_capital
             )
 
             # Track required lookback (include common indicators)
@@ -261,7 +273,7 @@ class MultiStrategyExecutorEnhanced:
 
         # Logger
         self.logger = logging.getLogger(__name__)
-        self.logger.info(
+        self._log_verbose(
             f"Initialized Enhanced MultiStrategyExecutor with {len(self.strategies)} strategies"
             f"{' (calendar disabled for backtest)' if self.ignore_calendar else ''}"
         )
@@ -276,6 +288,18 @@ class MultiStrategyExecutorEnhanced:
         tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
         atr = tr.ewm(alpha=1 / period, adjust=False).mean()
         return atr
+
+    def _log_verbose(self, message: str, level: str = "info") -> None:
+        """
+        Emit verbose logs only when deep_portfolio_debug is enabled; otherwise send to debug.
+        """
+        if self.deep_portfolio_debug:
+            if level.lower() == "debug":
+                self.logger.debug(message)
+            else:
+                self.logger.info(message)
+        else:
+            self.logger.debug(message)
 
     def _round_to_tick(self, price: Optional[float], symbol: str) -> Optional[float]:
         """
@@ -444,7 +468,7 @@ class MultiStrategyExecutorEnhanced:
 
         # Primary path: use the per-iteration counter (incremented in on_trading_iteration)
         if strategy_state.bars_in_trade >= int(max_bars):
-            self.logger.info(
+            self._log_verbose(
                 f"{strategy_state.strategy_id}: Time exit triggered "
                 f"({strategy_state.bars_in_trade} bars >= {max_bars} max bars)"
             )
@@ -455,7 +479,7 @@ class MultiStrategyExecutorEnhanced:
             bars_since = int((market_data.index > strategy_state.entry_time).sum())
             strategy_state.bars_in_trade = max(strategy_state.bars_in_trade, bars_since)
             if bars_since >= int(max_bars):
-                self.logger.info(
+                self._log_verbose(
                     f"{strategy_state.strategy_id}: Time exit triggered "
                     f"({bars_since} bars >= {max_bars} max bars; index-based)"
                 )
@@ -465,7 +489,7 @@ class MultiStrategyExecutorEnhanced:
         if strategy_state.entry_iteration is not None:
             bars_since_iter = self.iteration_count - strategy_state.entry_iteration
             if bars_since_iter >= int(max_bars):
-                self.logger.info(
+                self._log_verbose(
                     f"{strategy_state.strategy_id}: Time exit triggered "
                     f"({bars_since_iter} bars >= {max_bars} max bars; iteration-based)"
                 )
@@ -500,7 +524,7 @@ class MultiStrategyExecutorEnhanced:
             self.logger.error("No data_source configured; cannot run iteration.")
             return {"error": "data_source_missing"}
 
-        self.logger.info(f"{_YELLOW}=== Enhanced Multi-Strategy Iteration #{self.iteration_count} at {current_time} ==={_RESET}")
+        self._log_verbose(f"{_YELLOW}=== Enhanced Multi-Strategy Iteration #{self.iteration_count} at {current_time} ==={_RESET}")
 
         # Statistics for this iteration
         strategies_processed = 0
@@ -513,7 +537,7 @@ class MultiStrategyExecutorEnhanced:
         self.logger.debug(f"Fetching data for {len(symbols)} unique symbols: {symbols}")
 
         # Fetch with enough history for ATR calculations
-        self.logger.info(
+        self._log_verbose(
             f"{_YELLOW}[FETCH] start symbols={symbols} length={self.max_lookback} timestep={self.timestep}{_RESET}"
         )
         fetch_start = time.perf_counter()
@@ -523,7 +547,7 @@ class MultiStrategyExecutorEnhanced:
             timestep=self.timestep,
             asset_type=Asset.AssetType.CONT_FUTURE,
         )
-        self.logger.info(
+        self._log_verbose(
             f"{_YELLOW}[FETCH] done in {time.perf_counter() - fetch_start:.2f}s "
             f"cache_stats={self.shared_data.get_cache_stats()}{_RESET}"
         )
@@ -533,7 +557,7 @@ class MultiStrategyExecutorEnhanced:
             try:
                 per_strategy_start = time.perf_counter()
                 # 2a. Get cached data (no API call)
-                self.logger.info(
+                self._log_verbose(
                     f"{_YELLOW}[DATA] get_cached_data for {strategy_state.strategy_id} "
                     f"symbol={strategy_state.symbol} len={self.max_lookback} ts={self.timestep}{_RESET}"
                 )
@@ -576,7 +600,7 @@ class MultiStrategyExecutorEnhanced:
                     except Exception:
                         pass
 
-                self.logger.info(
+                self._log_verbose(
                     f"{_YELLOW}[PROCESS] {strategy_state.strategy_id} using "
                     f"{len(df) if hasattr(df,'__len__') else 'NA'} rows{_RESET}"
                 )
@@ -639,7 +663,7 @@ class MultiStrategyExecutorEnhanced:
 
                     # 2f. Force close if required by calendar
                     if status.must_be_flat and virtual_qty != 0:
-                        self.logger.info(
+                        self._log_verbose(
                             f"{strategy_state.strategy_id}: Force closing position " f"({status.close_reason})"
                         )
                         close_order = self._create_close_order(strategy_state, virtual_qty)
@@ -665,7 +689,7 @@ class MultiStrategyExecutorEnhanced:
                 except Exception:
                     bar_ts, close_val, open_val = current_time, None, None
                 # Always emit signal diagnostics at INFO so we can see HOLD/BUY/SELL
-                self.logger.info(
+                self._log_verbose(
                     f"{_YELLOW}[SIGNAL] {strategy_state.strategy_id} "
                     f"signal={signal} ts={bar_ts} close={close_val} open={open_val} "
                     f"bars={len(df)} virt_qty={virtual_qty}{_RESET}"
@@ -677,7 +701,7 @@ class MultiStrategyExecutorEnhanced:
                     order = self._create_bracket_order_for_strategy(strategy_state, signal, df)
                     if order:
                         orders_to_submit.append((strategy_state, order, False, "entry", None))
-                self.logger.info(
+                self._log_verbose(
                     f"{_YELLOW}[PROCESS] {strategy_state.strategy_id} done in "
                     f"{time.perf_counter() - per_strategy_start:.4f}s virt_qty={virtual_qty}{_RESET}"
                 )
@@ -711,13 +735,13 @@ class MultiStrategyExecutorEnhanced:
             "rate_limiter_stats": rate_limiter_stats,
         }
 
-        self.logger.info(
+        self._log_verbose(
             f"{_YELLOW}Iteration complete: {strategies_processed} strategies processed, "
             f"{signals_generated} signals, {time_exits_triggered} time exits, "
             f"{orders_submitted} orders, cache hit rate: {cache_stats['hit_rate']:.1f}%{_RESET}"
         )
         self.logger.debug(f"{_YELLOW}[FLOW] iteration_summary_logged{_RESET}")
-        self.logger.info(
+        self._log_verbose(
             f"{_YELLOW}[FLOW] iteration_duration={time.perf_counter() - iter_start:.4f}s "
             f"orders={orders_submitted} cache_hit_rate={cache_stats['hit_rate']:.1f}%{_RESET}"
         )
@@ -799,7 +823,7 @@ class MultiStrategyExecutorEnhanced:
             if self.broker_strategy_name:
                 order.strategy = self.broker_strategy_name
 
-            self.logger.info(
+            self._log_verbose(
                 f"Created bracket order for {strategy_state.strategy_id}: "
                 f"{side} {strategy_state.contracts} {asset.symbol}, "
                 f"TP={tp_price}, SL={sl_price}"
@@ -862,10 +886,10 @@ class MultiStrategyExecutorEnhanced:
         orders_submitted = 0
 
         if len(orders_to_submit) == 0:
-            self.logger.info("No orders to submit this iteration.")
+            self._log_verbose("No orders to submit this iteration.")
             return 0
         else:
-            self.logger.info(f"Submitting {len(orders_to_submit)} orders (simulate_fills={self.simulate_fills})")
+            self._log_verbose(f"Submitting {len(orders_to_submit)} orders (simulate_fills={self.simulate_fills})")
 
         for item in orders_to_submit:
             if len(item) == 5:
@@ -890,7 +914,7 @@ class MultiStrategyExecutorEnhanced:
                 # Submit order to broker unless simulating fills or broker missing
                 mark_submitted = False
                 if not self.simulate_fills and self.broker is not None:
-                    self.logger.info(
+                    self._log_verbose(
                         f"Submitting order for {strategy_state.strategy_id} ({reason}): "
                         f"{order.side} {order.quantity} {order.asset.symbol}"
                     )
@@ -973,6 +997,13 @@ class MultiStrategyExecutorEnhanced:
                         strategy_state.symbol, order.quantity, order.side, current_price
                     )
 
+                    # Track per-side TopstepX fee (if known)
+                    fee_per_side = get_per_order_fee(strategy_state.symbol) or 0.0
+                    fees_this_order = fee_per_side * abs(order.quantity)
+                    if fees_this_order:
+                        strategy_state.total_fees_paid += fees_this_order
+                        strategy_state.fees_since_entry += fees_this_order
+
                     # Track entry/exit bookkeeping
                     pos_after = strategy_state.tracker.get_position(strategy_state.symbol)
                     qty_after = pos_after.quantity if pos_after else 0.0
@@ -980,14 +1011,19 @@ class MultiStrategyExecutorEnhanced:
                     # Reversal or flattening: close prior position if we had one
                     if qty_before != 0 and (qty_after == 0 or qty_before * qty_after < 0):
                         entry_price = strategy_state.entry_price if strategy_state.entry_price is not None else current_price
-                        realized = (current_price - entry_price) * qty_before
-                        strategy_state.realized_pnl += realized
+                        multiplier = get_multiplier(strategy_state.symbol)
+                        realized = (current_price - entry_price) * qty_before * multiplier
+                        net_realized = realized - strategy_state.fees_since_entry
+                        strategy_state.realized_pnl += net_realized
                         self.attribution.record_trade(
                             strategy_state.strategy_id,
                             entry_price,
                             current_price,
                             qty_before,
                             timestamp=bar_time,
+                            fees=strategy_state.fees_since_entry,
+                            symbol=strategy_state.symbol,
+                            multiplier=multiplier,
                         )
                         strategy_state.trade_history.append(
                             {
@@ -995,7 +1031,8 @@ class MultiStrategyExecutorEnhanced:
                                 "entry_price": entry_price,
                                 "exit_price": current_price,
                                 "quantity": qty_before,
-                                "pnl": realized,
+                                "pnl": net_realized,
+                                "fees": strategy_state.fees_since_entry,
                             }
                         )
                         strategy_state.trade_count += 1
@@ -1007,6 +1044,7 @@ class MultiStrategyExecutorEnhanced:
                         strategy_state.take_profit_price = None
                         strategy_state.stop_loss_price = None
                         strategy_state.bars_in_trade = 0
+                        strategy_state.fees_since_entry = 0.0
 
                     # New entry (including reversal opening leg)
                     if (qty_after != 0 and qty_before == 0) or (qty_before * qty_after < 0):
@@ -1019,6 +1057,7 @@ class MultiStrategyExecutorEnhanced:
                         strategy_state.stop_loss_price = getattr(strategy_state, "pending_sl", None)
                         strategy_state.pending_tp = None
                         strategy_state.pending_sl = None
+                        strategy_state.fees_since_entry = fees_this_order
 
                     # If we simply added to an existing position, keep the original entry but refresh bars counter
                     if qty_after != 0 and qty_before == qty_after and qty_after != 0:
@@ -1052,6 +1091,8 @@ class MultiStrategyExecutorEnhanced:
                                 "unrealized_pnl": unrealized,
                                 "realized_pnl": strategy_state.realized_pnl,
                                 "trade_count": strategy_state.trade_count,
+                                "fees_paid": strategy_state.total_fees_paid,
+                                "fees_since_entry": strategy_state.fees_since_entry,
                             },
                         )
                 else:
@@ -1092,7 +1133,7 @@ class MultiStrategyExecutorEnhanced:
             "worst_strategy": self.attribution.get_worst_strategy(),
         }
 
-    def force_flatten(self, current_time: Optional[datetime] = None) -> int:
+    def force_flatten(self, current_time: Optional[datetime] = None) -> tuple[int, list]:
         """
         Force-close all open positions using the latest cached prices.
 
@@ -1100,24 +1141,55 @@ class MultiStrategyExecutorEnhanced:
             current_time: Timestamp used for the close (defaults to now)
 
         Returns:
-            Number of close orders executed.
+            Tuple of (number of close orders executed, details list).
         """
         if current_time is None:
             current_time = datetime.now()
 
         orders: List[tuple] = []
+        forced_details: list = []
         for state in self.strategies:
             pos = state.tracker.get_position(state.symbol)
             if pos and pos.quantity != 0:
+                last_price = None
+                try:
+                    md = self.shared_data.get_cached_data(state.symbol, self.max_lookback, self.timestep)
+                    df = md.df if hasattr(md, "df") else md
+                    if df is not None and len(df) > 0:
+                        last_price = float(df["close"].iloc[-1])
+                except Exception:
+                    last_price = None
+                entry_price = state.entry_price
+                multiplier = get_multiplier(state.symbol)
+                if last_price is not None and entry_price is not None:
+                    gross = (last_price - entry_price) * pos.quantity * multiplier
+                    net = gross - state.fees_since_entry
+                else:
+                    gross = None
+                    net = None
                 close_order = self._create_close_order(state, pos.quantity)
                 if close_order:
                     orders.append((state, close_order, True, "force_flatten", None))
+                    forced_details.append(
+                        {
+                            "strategy_id": state.strategy_id,
+                            "symbol": state.symbol,
+                            "qty": pos.quantity,
+                            "entry_price": entry_price,
+                            "last_price": last_price,
+                            "multiplier": multiplier,
+                            "gross_pnl": gross,
+                            "fees_pending": state.fees_since_entry,
+                            "net_pnl": net,
+                        }
+                    )
 
         if orders:
-            self.logger.info(f"Forcing flatten of {len(orders)} open positions at end of run")
-            return self._execute_all_orders(orders, current_time)
+            self._log_verbose(f"Forcing flatten of {len(orders)} open positions at end of run")
+            count = self._execute_all_orders(orders, current_time)
+            return count, forced_details
 
-        return 0
+        return 0, forced_details
 
     def __repr__(self) -> str:
         """String representation of executor."""

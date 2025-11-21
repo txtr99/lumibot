@@ -222,6 +222,7 @@ class PortfolioManager:
         shared_initial_capital: float = 150000.0,
         ignore_calendar: bool = False,
         broker_strategy_name: Optional[str] = None,
+        deep_portfolio_debug: bool = False,
     ):
         """
         Initialize the PortfolioManager.
@@ -237,6 +238,7 @@ class PortfolioManager:
             default_atr_period: Default ATR period (default: 20)
             ignore_calendar: If True, skip calendar/session gating (useful for backtests)
             broker_strategy_name: Optional wrapper strategy name used when submitting real orders
+            deep_portfolio_debug: Emit verbose executor logs when True
 
         Note:
             Tick sizes are automatically looked up per symbol from futures_metadata
@@ -247,6 +249,7 @@ class PortfolioManager:
         self.data_source = data_source if data_source is not None else (broker.data_source if broker else None)
         self.calendar = calendar
         self.broker_strategy_name = broker_strategy_name
+        self.deep_portfolio_debug = deep_portfolio_debug
 
         # Create strategies folder if it doesn't exist
         self.strategies_folder.mkdir(parents=True, exist_ok=True)
@@ -273,6 +276,7 @@ class PortfolioManager:
             "shared_initial_capital": shared_initial_capital,
             "ignore_calendar": ignore_calendar,
             "broker_strategy_name": broker_strategy_name,
+            "deep_portfolio_debug": deep_portfolio_debug,
         }
 
         # Auto-load strategies if requested

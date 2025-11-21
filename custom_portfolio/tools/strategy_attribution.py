@@ -78,6 +78,7 @@ class StrategyAttribution:
             "trades": [],
             "pnl_history": [],
             "total_pnl": 0.0,
+            "total_fees": 0.0,
             "win_count": 0,
             "loss_count": 0,
             "registered_at": datetime.now(),
@@ -105,7 +106,15 @@ class StrategyAttribution:
         return pd.DataFrame(list(self.snapshots))
 
     def record_trade(
-        self, strategy_id: str, entry_price: float, exit_price: float, quantity: float, timestamp: datetime = None
+        self,
+        strategy_id: str,
+        entry_price: float,
+        exit_price: float,
+        quantity: float,
+        timestamp: datetime = None,
+        fees: float = 0.0,
+        symbol: str = None,
+        multiplier: float = None,
     ) -> None:
         """
         Record a completed trade for attribution.
@@ -127,8 +136,14 @@ class StrategyAttribution:
         if timestamp is None:
             timestamp = datetime.now()
 
-        # Calculate P&L
-        pnl = (exit_price - entry_price) * quantity
+        # Calculate P&L (net of fees) with contract multiplier
+        if multiplier is None:
+            try:
+                from custom_portfolio.data.futures_metadata import get_multiplier
+                multiplier = get_multiplier(symbol) if symbol else 1.0
+            except Exception:
+                multiplier = 1.0
+        pnl = (exit_price - entry_price) * quantity * multiplier - fees
 
         # Create trade record
         trade = {
@@ -137,6 +152,7 @@ class StrategyAttribution:
             "exit_price": exit_price,
             "quantity": quantity,
             "pnl": pnl,
+            "fees": fees,
         }
 
         # Update metrics
@@ -144,6 +160,7 @@ class StrategyAttribution:
         metrics["trades"].append(trade)
         metrics["pnl_history"].append(pnl)
         metrics["total_pnl"] += pnl
+        metrics["total_fees"] += fees
 
         if pnl > 0:
             metrics["win_count"] += 1
@@ -193,6 +210,7 @@ class StrategyAttribution:
             return {
                 "strategy_id": strategy_id,
                 "total_pnl": 0.0,
+                "total_fees": 0.0,
                 "trade_count": 0,
                 "win_count": 0,
                 "loss_count": 0,
@@ -242,6 +260,7 @@ class StrategyAttribution:
         return {
             "strategy_id": strategy_id,
             "total_pnl": total_pnl,
+            "total_fees": metrics.get("total_fees", 0.0),
             "trade_count": trade_count,
             "win_count": win_count,
             "loss_count": loss_count,

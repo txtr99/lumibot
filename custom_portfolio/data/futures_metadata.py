@@ -397,6 +397,89 @@ def get_tick_value(symbol: str) -> float:
     return FUTURES_METADATA.get(symbol, {}).get("tick_value", 1.0)
 
 
+# Explicit contract multipliers for Topstep-permitted symbols; fallback uses tick_value / tick_size.
+MULTIPLIER_OVERRIDES = {
+    # Equity index
+    "ES": 50.0,
+    "MES": 5.0,
+    "NQ": 20.0,
+    "MNQ": 2.0,
+    "RTY": 50.0,
+    "M2K": 5.0,
+    "YM": 5.0,
+    "MYM": 0.5,
+    "NKD": 5.0,
+    # Crypto micros
+    "MBT": 5.0,
+    "MET": 0.1,
+    # Energy
+    "CL": 1000.0,
+    "MCL": 100.0,
+    "QM": 500.0,
+    "NG": 10000.0,
+    "QG": 2500.0,
+    "MNG": 2500.0,
+    "RB": 42000.0,
+    "HO": 42000.0,
+    # Metals
+    "GC": 100.0,
+    "MGC": 10.0,
+    "SI": 5000.0,
+    "SIL": 1000.0,
+    "HG": 25000.0,
+    "MHG": 12500.0,
+    "PL": 50.0,
+    # Ags / meats
+    "HE": 40000.0,
+    "LE": 40000.0,
+    "ZC": 50.0,
+    "ZW": 50.0,
+    "ZS": 50.0,
+    "ZM": 100.0,
+    "ZL": 600.0,
+    # FX
+    "6A": 100000.0,
+    "6B": 62500.0,
+    "6C": 100000.0,
+    "6E": 125000.0,
+    "6J": 12500000.0,
+    "6S": 125000.0,
+    "6M": 500000.0,
+    "6N": 100000.0,
+    "M6A": 10000.0,
+    "M6B": 6250.0,
+    "M6E": 12500.0,
+    "E7": 62500.0,
+    # Rates (approximate DV01 scaling; consistent with CME minis)
+    "ZT": 2000.0,
+    "ZF": 2000.0,
+    "ZN": 1000.0,
+    "ZB": 1000.0,
+    "UB": 1000.0,
+    "TN": 1000.0,
+}
+
+
+def get_multiplier(symbol: str) -> float:
+    """
+    Derive the contract multiplier using tick value / tick size when available.
+    Defaults to 1.0 if data is missing.
+    """
+    if not symbol:
+        return 1.0
+    symbol = symbol.upper()
+    if symbol in MULTIPLIER_OVERRIDES:
+        return MULTIPLIER_OVERRIDES[symbol]
+    try:
+        tv = float(get_tick_value(symbol))
+        ts = float(get_tick_size(symbol))
+        if ts != 0:
+            return tv / ts
+    except Exception:
+        pass
+    return 1.0
+
+
 def get_market_info(symbol: str) -> dict:
     """
     Get all market metadata for a futures symbol.

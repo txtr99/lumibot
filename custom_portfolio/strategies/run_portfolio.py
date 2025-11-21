@@ -235,6 +235,11 @@ def _debug_config():
     return os.environ.get("PORTFOLIO_DEBUG", "true").lower() == "true"
 
 
+def _deep_debug_config():
+    """Enable deep executor logging (only when explicitly requested)."""
+    return os.environ.get("DEEP_PORTFOLIO_DEBUG", "false").lower() == "true"
+
+
 def _visual_config():
     """Read visualization toggles from env with defaults of True when unset."""
     show_plot = _env_flag("SHOW_PLOT", True)
@@ -330,6 +335,7 @@ def run_backtest(args):
     simulate_fills = _simulate_fills_config()
     shared_initial_capital = _capital_config()
     debug_logs = _debug_config()
+    deep_portfolio_debug = _deep_debug_config()
     show_plot, show_tearsheet, show_indicators = _visual_config()
     print(f"[SETTINGS] plot={show_plot} tearsheet={show_tearsheet} indicators={show_indicators}")
 
@@ -354,9 +360,11 @@ def run_backtest(args):
 
         # Keep reference to last manager for exports
         _last_manager = None
+        _base_capital = 0.0
 
         def initialize(self):
             """Initialize the portfolio manager."""
+            PortfolioStrategy._base_capital = shared_initial_capital
             # Track backtest window for progress logging (use private attrs to avoid clashing with properties)
             self._progress_start = backtesting_start
             self._progress_end = backtesting_end
@@ -394,6 +402,7 @@ def run_backtest(args):
                 simulate_fills=simulate_fills,
                 shared_initial_capital=shared_initial_capital,
                 broker_strategy_name=getattr(self, "name", "PortfolioStrategy"),
+                deep_portfolio_debug=deep_portfolio_debug,
                 ignore_calendar=True,  # For backtests, always process signals regardless of session gating
             )
 
@@ -456,6 +465,17 @@ def run_backtest(args):
 
             # Store manager for export after backtest
             PortfolioStrategy._last_manager = self.portfolio_manager
+
+        def get_portfolio_value(self):
+            """Override to surface attribution-based portfolio value during backtest."""
+            mgr = getattr(self, "portfolio_manager", None)
+            if mgr and getattr(mgr, "executor", None):
+                attr = mgr.executor.attribution.generate_report()
+                if attr is not None and not attr.empty:
+                    equity_base = float(attr["initial_capital"].sum()) if "initial_capital" in attr.columns else float(getattr(mgr.executor, "total_initial_capital", PortfolioStrategy._base_capital))
+                    total_pnl = float(attr["total_pnl"].sum())
+                    return equity_base + total_pnl
+            return super().get_portfolio_value()
 
         def _log_progress_debug(self, current_time: datetime):
             """Emit a derived progress percentage for debugging."""
@@ -539,6 +559,7 @@ def run_backtest(args):
             parameters={},
             buy_trading_fees=[TradingFee(flat_fee=0.75)],  # $0.75 per trade for futures
             sell_trading_fees=[TradingFee(flat_fee=0.75)],
+            budget=shared_initial_capital,
             show_plot=show_plot,
             show_tearsheet=show_tearsheet,
             show_indicators=show_indicators,
@@ -575,7 +596,16 @@ def run_backtest(args):
     manager = PortfolioStrategy._last_manager
     if manager and getattr(manager, "executor", None):
         try:
-            manager.executor.force_flatten()
+            close_count, forced_details = manager.executor.force_flatten()
+            if forced_details:
+                print("\nForced-close summary (attribution):")
+                for item in forced_details:
+                    print(
+                        f"- {item['strategy_id']} {item['symbol']} qty={item['qty']} "
+                        f"entry={item['entry_price']} last={item['last_price']} "
+                        f"mult={item['multiplier']} gross={item['gross_pnl']} "
+                        f"fees_pending={item['fees_pending']} net={item['net_pnl']}"
+                    )
         except Exception as e:
             logging.getLogger(__name__).warning(f"Force flatten failed: {e}")
 
@@ -592,11 +622,15 @@ def run_backtest(args):
             try:
                 total_trades_attr = int(attr_report["trade_count"].sum())
                 total_pnl_attr = float(attr_report["total_pnl"].sum())
-                equity_base = float(manager.executor.shared_initial_capital or 1.0)
-                total_return_attr = total_pnl_attr / equity_base
+                total_fees_attr = float(attr_report["total_fees"].sum()) if "total_fees" in attr_report.columns else 0.0
+                # Sum initial capital across strategies (executor registers per-strategy share)
+                equity_base = float(attr_report["initial_capital"].sum()) if "initial_capital" in attr_report.columns else float(getattr(manager.executor, "total_initial_capital", manager.executor.shared_initial_capital or 1.0))
+                total_return_attr = total_pnl_attr / equity_base if equity_base else 0.0
                 if results is not None:
                     results["total_trades"] = total_trades_attr
                     results["total_return"] = total_return_attr
+                    results["portfolio_value"] = equity_base + total_pnl_attr
+                    results["total_fees"] = total_fees_attr
             except Exception:
                 pass
 
@@ -620,6 +654,10 @@ def run_backtest(args):
         print(f"Max Drawdown: {_fmt_pct(results.get('max_drawdown', 0))}")
         print(f"Sharpe Ratio: {_fmt_num(results.get('sharpe_ratio', 0))}")
         print(f"Total Trades: {results.get('total_trades', 0)}")
+        if "total_fees" in results:
+            print(f"Total Fees: {_fmt_num(results.get('total_fees', 0))}")
+        if "portfolio_value" in results:
+            print(f"Portfolio Value (attribution): {_fmt_num(results.get('portfolio_value', 0))}")
 
     # Export snapshots if enabled
     if manager:
@@ -646,6 +684,8 @@ def run_live(args):
     enable_snapshots, max_snapshots, timestep = _snapshot_config()
     simulate_fills = _simulate_fills_config()
     shared_initial_capital = _capital_config()
+    deep_portfolio_debug = _deep_debug_config()
+    fill_price_mode = "close"
 
     # Confirmation prompt
     confirm = input("Are you sure you want to run in LIVE mode? (yes/no): ")
@@ -683,6 +723,7 @@ def run_live(args):
         timestep=timestep,
         simulate_fills=simulate_fills,
         shared_initial_capital=shared_initial_capital,
+        deep_portfolio_debug=deep_portfolio_debug,
     )
 
     # Print validation report
@@ -747,6 +788,7 @@ def validate_only(args):
     enable_snapshots, max_snapshots, timestep = _snapshot_config()
     simulate_fills = _simulate_fills_config()
     shared_initial_capital = _capital_config()
+    deep_portfolio_debug = _deep_debug_config()
 
     # Create a minimal portfolio manager for validation
     portfolio_manager = PortfolioManager(
@@ -759,6 +801,7 @@ def validate_only(args):
         timestep=timestep,
         simulate_fills=simulate_fills,
         shared_initial_capital=shared_initial_capital,
+        deep_portfolio_debug=deep_portfolio_debug,
     )
 
     # Print validation report (includes all formatting and final status)
