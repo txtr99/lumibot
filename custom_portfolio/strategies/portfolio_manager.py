@@ -173,8 +173,8 @@ class StrategyLoader:
         """
         config = module.STRATEGY_CONFIG.copy()
 
-        # Add the generate_signal function reference
-        config["generate_signal_func"] = module.generate_signal
+        # Standardized internal key for signal generation
+        config["_generate_signal_func"] = module.generate_signal
 
         # Add module reference for reloading
         config["_module"] = module
@@ -220,6 +220,8 @@ class PortfolioManager:
         max_snapshots: int = 200000,
         timestep: str = "minute",
         shared_initial_capital: float = 150000.0,
+        ignore_calendar: bool = False,
+        broker_strategy_name: Optional[str] = None,
     ):
         """
         Initialize the PortfolioManager.
@@ -233,6 +235,8 @@ class PortfolioManager:
             cache_ttl_seconds: Data cache TTL (default: 60)
             min_order_delay_seconds: Minimum delay between orders (default: 2.0)
             default_atr_period: Default ATR period (default: 20)
+            ignore_calendar: If True, skip calendar/session gating (useful for backtests)
+            broker_strategy_name: Optional wrapper strategy name used when submitting real orders
 
         Note:
             Tick sizes are automatically looked up per symbol from futures_metadata
@@ -242,6 +246,7 @@ class PortfolioManager:
         # Get data_source from broker if not explicitly provided
         self.data_source = data_source if data_source is not None else (broker.data_source if broker else None)
         self.calendar = calendar
+        self.broker_strategy_name = broker_strategy_name
 
         # Create strategies folder if it doesn't exist
         self.strategies_folder.mkdir(parents=True, exist_ok=True)
@@ -266,6 +271,8 @@ class PortfolioManager:
             "max_snapshots": max_snapshots,
             "timestep": timestep,
             "shared_initial_capital": shared_initial_capital,
+            "ignore_calendar": ignore_calendar,
+            "broker_strategy_name": broker_strategy_name,
         }
 
         # Auto-load strategies if requested
@@ -428,6 +435,7 @@ class PortfolioManager:
         # Convert loaded strategies to executor format
         strategy_configs = []
         for strategy_id, config in self.loaded_strategies.items():
+            sig_func = config.get("_generate_signal_func") or config.get("generate_signal_func")
             executor_config = {
                 "strategy_id": strategy_id,
                 "strategy_type": config.get("strategy_type", "DynamicStrategy"),
@@ -437,7 +445,7 @@ class PortfolioManager:
                 "allowed_sessions": config.get("allowed_sessions", ["New_York"]),
                 "initial_capital": config.get("initial_capital", 0.0),
                 # Store generate_signal function reference
-                "_generate_signal_func": config["generate_signal_func"],
+                "_generate_signal_func": sig_func,
                 # Store bracket and exit configs
                 "_bracket_config": config.get("bracket_config", {}),
                 "_exit_config": config.get("exit_config", {}),
@@ -482,9 +490,15 @@ class PortfolioManager:
                     config = loaded_config
                     break
 
-            if config and "_generate_signal_func" in config:
-                # Store the function reference on the state
-                strategy_state.generate_signal_func = config["_generate_signal_func"]
+            if config:
+                sig_func = config.get("_generate_signal_func") or config.get("generate_signal_func")
+                if sig_func:
+                    if "_generate_signal_func" not in config:
+                        self.logger.debug(
+                            f"Using legacy generate_signal_func for {strategy_state.strategy_id}; "
+                            f"consider updating to _generate_signal_func."
+                        )
+                    strategy_state.generate_signal_func = sig_func
 
     def run_iteration(self, current_time: datetime = None) -> Dict[str, Any]:
         """
@@ -511,6 +525,13 @@ class PortfolioManager:
             """Use the dynamically loaded signal generation function."""
             if hasattr(strategy_state, "generate_signal_func"):
                 return strategy_state.generate_signal_func(strategy_state, market_data)
+
+            # Warn once per strategy about missing signal function
+            if not getattr(strategy_state, "_missing_signal_warned", False):
+                self.logger.warning(
+                    f"No generate_signal_func found for {strategy_state.strategy_id}; returning HOLD"
+                )
+                strategy_state._missing_signal_warned = True
             return "HOLD"
 
         # Temporarily replace the method
@@ -723,9 +744,9 @@ class PortfolioManager:
                 row["tp_mult"] = bracket.get("profit_target_mult", 0)
                 row["sl_mult"] = bracket.get("stop_loss_mult", 0)
 
-            # Add exit config info
+            # Add exit config info (fallback to params if exit config missing)
             exit_cfg = config.get("exit_config", {})
-            row["max_bars"] = exit_cfg.get("max_bars_in_trade")
+            row["max_bars"] = exit_cfg.get("max_bars_in_trade") or config["params"].get("max_bars")
 
             data.append(row)
 

@@ -53,7 +53,13 @@ class EnhancedStrategyState(StrategyState):
         super().__init__(*args, **kwargs)
         self.entry_time: Optional[datetime] = None
         self.entry_price: Optional[float] = None
+        self.entry_iteration: Optional[int] = None
         self.bars_in_trade: int = 0
+        self.entry_side: Optional[str] = None
+        self.take_profit_price: Optional[float] = None
+        self.stop_loss_price: Optional[float] = None
+        self.pending_tp: Optional[float] = None
+        self.pending_sl: Optional[float] = None
 
         # ATR caching for bracket orders
         self.last_atr: Optional[float] = None
@@ -172,6 +178,8 @@ class MultiStrategyExecutorEnhanced:
         max_snapshots: int = 200000,
         timestep: str = "minute",
         shared_initial_capital: float = 150000.0,
+        ignore_calendar: bool = False,
+        broker_strategy_name: Optional[str] = None,
     ):
         """
         Initialize the enhanced MultiStrategyExecutor.
@@ -184,6 +192,8 @@ class MultiStrategyExecutorEnhanced:
             cache_ttl_seconds: Cache TTL for data (default: 60)
             min_order_delay_seconds: Minimum delay between orders (default: 2.0)
             default_atr_period: Default ATR period if not specified (default: 20)
+            ignore_calendar: If True, skip calendar/session gating (useful for backtests)
+            broker_strategy_name: Optional wrapper strategy name to tag real broker orders
 
         Note:
             Tick sizes are now automatically looked up per symbol from futures_metadata
@@ -201,6 +211,8 @@ class MultiStrategyExecutorEnhanced:
         self.rate_limiter = GlobalRateLimiter(min_order_delay_seconds)
         self.attribution = StrategyAttribution(max_snapshots=max_snapshots)
         self.shared_initial_capital = shared_initial_capital
+        self.ignore_calendar = ignore_calendar
+        self.broker_strategy_name = broker_strategy_name
 
         # Dictionary to hold loaded strategy modules for dynamic loading
         self.strategy_modules = {}
@@ -249,7 +261,10 @@ class MultiStrategyExecutorEnhanced:
 
         # Logger
         self.logger = logging.getLogger(__name__)
-        self.logger.info(f"Initialized Enhanced MultiStrategyExecutor with {len(self.strategies)} strategies")
+        self.logger.info(
+            f"Initialized Enhanced MultiStrategyExecutor with {len(self.strategies)} strategies"
+            f"{' (calendar disabled for backtest)' if self.ignore_calendar else ''}"
+        )
 
         # Statistics
         self.iteration_count = 0
@@ -277,9 +292,15 @@ class MultiStrategyExecutorEnhanced:
             return price
 
         # Import locally to avoid circular dependencies
-        from lumibot.data.futures_metadata import get_tick_size
+        try:
+            from custom_portfolio.data.futures_metadata import get_tick_size
+        except Exception:
+            try:
+                from lumibot.data.futures_metadata import get_tick_size  # type: ignore
+            except Exception:
+                get_tick_size = None
 
-        tick_size = get_tick_size(symbol)
+        tick_size = get_tick_size(symbol) if callable(get_tick_size) else 0
         if tick_size <= 0:
             return price
 
@@ -301,8 +322,17 @@ class MultiStrategyExecutorEnhanced:
         """
         # Get ATR parameters from strategy
         atr_period = int(strategy_state.params.get("atr_period", self.default_atr_period))
-        pt_mult = float(strategy_state.params.get("pt_mult", 0.0))
-        sl_mult = float(strategy_state.params.get("sl_mult", 0.0))
+        # Accept both legacy (pt_mult/sl_mult) and bracket_config keys (profit_target_mult/stop_loss_mult)
+        pt_mult = float(
+            strategy_state.params.get(
+                "pt_mult", strategy_state.params.get("profit_target_mult", 0.0)
+            )
+        )
+        sl_mult = float(
+            strategy_state.params.get(
+                "sl_mult", strategy_state.params.get("stop_loss_mult", 0.0)
+            )
+        )
         use_tp = bool(strategy_state.params.get("use_atr_profit", True))
         use_sl = bool(strategy_state.params.get("use_atr_stop", True))
 
@@ -345,6 +375,41 @@ class MultiStrategyExecutorEnhanced:
 
         return tp, sl
 
+    def _check_bracket_hit(self, strategy_state: EnhancedStrategyState, market_data: pd.DataFrame):
+        """
+        Check whether the latest bar hits TP/SL.
+
+        Returns:
+            (hit, price, reason)
+        """
+        if market_data is None or len(market_data) == 0:
+            return False, None, None
+
+        pos = strategy_state.tracker.get_position(strategy_state.symbol)
+        if pos is None or pos.quantity == 0:
+            return False, None, None
+
+        last_bar = market_data.iloc[-1]
+        high = last_bar.get("high", last_bar.get("close"))
+        low = last_bar.get("low", last_bar.get("close"))
+
+        tp = strategy_state.take_profit_price
+        sl = strategy_state.stop_loss_price
+        qty = pos.quantity
+
+        if qty > 0:
+            if sl is not None and low is not None and low <= sl:
+                return True, float(sl), "bracket_sl"
+            if tp is not None and high is not None and high >= tp:
+                return True, float(tp), "bracket_tp"
+        elif qty < 0:
+            if sl is not None and high is not None and high >= sl:
+                return True, float(sl), "bracket_sl"
+            if tp is not None and low is not None and low <= tp:
+                return True, float(tp), "bracket_tp"
+
+        return False, None, None
+
     def _check_time_exit(self, strategy_state: EnhancedStrategyState, market_data: pd.DataFrame) -> bool:
         """
         Check if position should be exited based on time (max bars in trade).
@@ -356,9 +421,17 @@ class MultiStrategyExecutorEnhanced:
         Returns:
             True if time exit was triggered, False otherwise
         """
-        max_bars = strategy_state.params.get("max_bars", None)
-        if max_bars is None:
-            return False
+        max_bars = (
+            strategy_state.params.get("max_bars")
+            or strategy_state.params.get("max_bars_in_trade")
+            or strategy_state.params.get("max_bars_in_position")
+        )
+        # Provide a default so dummy strategies actually exit
+        try:
+            if max_bars is None or pd.isna(max_bars) or float(max_bars) <= 0:
+                max_bars = 50
+        except Exception:
+            max_bars = 50
 
         # Check if we have a position
         qty = strategy_state.get_current_position_qty()
@@ -369,20 +442,34 @@ class MultiStrategyExecutorEnhanced:
         if strategy_state.entry_time is None:
             return False
 
-        # Count bars since entry (using DataFrame index)
-        if len(market_data) == 0:
-            return False
-
-        # Find bars since entry time
-        bars_since = int((market_data.index > strategy_state.entry_time).sum())
-        strategy_state.bars_in_trade = bars_since
-
-        # Check if max bars exceeded
-        if bars_since >= int(max_bars):
+        # Primary path: use the per-iteration counter (incremented in on_trading_iteration)
+        if strategy_state.bars_in_trade >= int(max_bars):
             self.logger.info(
-                f"{strategy_state.strategy_id}: Time exit triggered " f"({bars_since} bars >= {max_bars} max bars)"
+                f"{strategy_state.strategy_id}: Time exit triggered "
+                f"({strategy_state.bars_in_trade} bars >= {max_bars} max bars)"
             )
             return True
+
+        # Fallback: derive bars_in_trade from index if counter not yet populated
+        if len(market_data) > 0:
+            bars_since = int((market_data.index > strategy_state.entry_time).sum())
+            strategy_state.bars_in_trade = max(strategy_state.bars_in_trade, bars_since)
+            if bars_since >= int(max_bars):
+                self.logger.info(
+                    f"{strategy_state.strategy_id}: Time exit triggered "
+                    f"({bars_since} bars >= {max_bars} max bars; index-based)"
+                )
+                return True
+
+        # Fallback: iteration counter if timestamps/index fail
+        if strategy_state.entry_iteration is not None:
+            bars_since_iter = self.iteration_count - strategy_state.entry_iteration
+            if bars_since_iter >= int(max_bars):
+                self.logger.info(
+                    f"{strategy_state.strategy_id}: Time exit triggered "
+                    f"({bars_since_iter} bars >= {max_bars} max bars; iteration-based)"
+                )
+                return True
 
         return False
 
@@ -466,28 +553,68 @@ class MultiStrategyExecutorEnhanced:
                 else:
                     df = market_data
 
+                # Truncate data up to current time so signals evaluate current bar, not full month.
+                # Fast-path: if current_time is at/after last bar, keep full data; otherwise slice by position.
+                if hasattr(df, "index") and len(df.index) > 0:
+                    try:
+                        idx = df.index
+                        last_idx = idx[-1]
+                        if current_time < last_idx:
+                            ct_ts = pd.Timestamp(current_time)
+                            idx_tz = getattr(idx, "tz", None)
+                            if idx_tz is not None:
+                                if ct_ts.tzinfo is None:
+                                    ct_ts = ct_ts.tz_localize(idx_tz)
+                                elif ct_ts.tzinfo != idx_tz:
+                                    ct_ts = ct_ts.tz_convert(idx_tz)
+                            else:
+                                if ct_ts.tzinfo is not None:
+                                    ct_ts = ct_ts.tz_convert(None)
+                            pos = idx.searchsorted(ct_ts, side="right")
+                            if pos and pos < len(df):
+                                df = df.iloc[:pos]
+                    except Exception:
+                        pass
+
                 self.logger.info(
                     f"{_YELLOW}[PROCESS] {strategy_state.strategy_id} using "
                     f"{len(df) if hasattr(df,'__len__') else 'NA'} rows{_RESET}"
                 )
 
-                # 2b. Check for time-based exit FIRST (before new signals)
+                # Count this strategy as processed once we have data in hand
+                strategies_processed += 1
+
+                # Track bars in trade while a position is open
                 virtual_pos = strategy_state.tracker.get_position(strategy_state.symbol)
                 virtual_qty = virtual_pos.quantity if virtual_pos else 0.0
+                if virtual_qty != 0:
+                    strategy_state.bars_in_trade += 1
 
+                # 2b. If already in position, first check for bracket hits
+                if virtual_qty != 0:
+                    hit, hit_price, hit_reason = self._check_bracket_hit(strategy_state, df)
+                    if hit and hit_price is not None:
+                        close_order = self._create_close_order(strategy_state, virtual_qty)
+                        if close_order:
+                            orders_to_submit.append((strategy_state, close_order, True, hit_reason, hit_price))
+                            continue
+
+                # 2c. Time-based exit check
                 if virtual_qty != 0 and self._check_time_exit(strategy_state, df):
                     time_exits_triggered += 1
                     close_order = self._create_close_order(strategy_state, virtual_qty)
                     if close_order:
-                        orders_to_submit.append((strategy_state, close_order, True, "time_exit"))
+                        orders_to_submit.append((strategy_state, close_order, True, "time_exit", None))
                         # Clear entry tracking after time exit
                         strategy_state.entry_time = None
                         strategy_state.entry_price = None
                         strategy_state.bars_in_trade = 0
+                        strategy_state.take_profit_price = None
+                        strategy_state.stop_loss_price = None
                     continue
 
-                # 2c. Check calendar/timing (only if calendar is available)
-                if self.calendar is not None:
+                # 2d. Check calendar/timing (only if calendar is available)
+                if (not self.ignore_calendar) and (self.calendar is not None):
                     status = self.calendar.get_status(
                         strategy_state.symbol,
                         current_time,
@@ -498,13 +625,15 @@ class MultiStrategyExecutorEnhanced:
 
                     # 2d. Skip if platform closed
                     if not status.platform_open:
-                        self.logger.debug(f"{strategy_state.strategy_id}: Platform closed ({status.platform_reason})")
+                        self.logger.debug(
+                            f"{strategy_state.strategy_id}: Platform closed ({status.platform_reason})"
+                        )
                         continue
 
                     # 2e. Skip if can't enter new positions
                     if not status.can_enter_orders and virtual_qty == 0:
                         self.logger.debug(
-                            f"{strategy_state.strategy_id}: Cannot enter new orders " f"(session restrictions)"
+                            f"{strategy_state.strategy_id}: Cannot enter new orders (session restrictions)"
                         )
                         continue
 
@@ -527,14 +656,27 @@ class MultiStrategyExecutorEnhanced:
                 strategy_state.last_signal = signal
                 strategy_state.last_signal_time = current_time
 
-                strategies_processed += 1
+                # Signal diagnostics (info-level, yellow)
+                try:
+                    last_bar = df.iloc[-1]
+                    bar_ts = getattr(last_bar, "name", current_time)
+                    close_val = last_bar["close"] if "close" in df.columns else None
+                    open_val = last_bar["open"] if "open" in df.columns else None
+                except Exception:
+                    bar_ts, close_val, open_val = current_time, None, None
+                # Always emit signal diagnostics at INFO so we can see HOLD/BUY/SELL
+                self.logger.info(
+                    f"{_YELLOW}[SIGNAL] {strategy_state.strategy_id} "
+                    f"signal={signal} ts={bar_ts} close={close_val} open={open_val} "
+                    f"bars={len(df)} virt_qty={virtual_qty}{_RESET}"
+                )
 
                 # 2i. Create order with bracket if signal generated
                 if signal in ["BUY", "SELL"]:
                     signals_generated += 1
                     order = self._create_bracket_order_for_strategy(strategy_state, signal, df)
                     if order:
-                        orders_to_submit.append((strategy_state, order, False, "entry"))
+                        orders_to_submit.append((strategy_state, order, False, "entry", None))
                 self.logger.info(
                     f"{_YELLOW}[PROCESS] {strategy_state.strategy_id} done in "
                     f"{time.perf_counter() - per_strategy_start:.4f}s virt_qty={virtual_qty}{_RESET}"
@@ -545,18 +687,18 @@ class MultiStrategyExecutorEnhanced:
                 continue
 
         # Step 3: Execute all orders sequentially with rate limiting
-        self.logger.info(f"{_YELLOW}[FLOW] before_execute orders_to_submit={len(orders_to_submit)}{_RESET}")
+        self.logger.debug(f"{_YELLOW}[FLOW] before_execute orders_to_submit={len(orders_to_submit)}{_RESET}")
         orders_submitted = self._execute_all_orders(orders_to_submit, current_time)
-        self.logger.info(f"{_YELLOW}[FLOW] after_execute orders_submitted={orders_submitted}{_RESET}")
+        self.logger.debug(f"{_YELLOW}[FLOW] after_execute orders_submitted={orders_submitted}{_RESET}")
 
         # Step 4: Log iteration summary
-        self.logger.info(f"{_YELLOW}[FLOW] cache_stats_start{_RESET}")
+        self.logger.debug(f"{_YELLOW}[FLOW] cache_stats_start{_RESET}")
         cache_stats = self.shared_data.get_cache_stats()
-        self.logger.info(f"{_YELLOW}[FLOW] cache_stats_end{_RESET}")
+        self.logger.debug(f"{_YELLOW}[FLOW] cache_stats_end{_RESET}")
 
-        self.logger.info(f"{_YELLOW}[FLOW] rate_limiter_stats_start{_RESET}")
+        self.logger.debug(f"{_YELLOW}[FLOW] rate_limiter_stats_start{_RESET}")
         rate_limiter_stats = self.rate_limiter.get_stats()
-        self.logger.info(f"{_YELLOW}[FLOW] rate_limiter_stats_end{_RESET}")
+        self.logger.debug(f"{_YELLOW}[FLOW] rate_limiter_stats_end{_RESET}")
 
         summary = {
             "iteration": self.iteration_count,
@@ -574,7 +716,7 @@ class MultiStrategyExecutorEnhanced:
             f"{signals_generated} signals, {time_exits_triggered} time exits, "
             f"{orders_submitted} orders, cache hit rate: {cache_stats['hit_rate']:.1f}%{_RESET}"
         )
-        self.logger.info(f"{_YELLOW}[FLOW] iteration_summary_logged{_RESET}")
+        self.logger.debug(f"{_YELLOW}[FLOW] iteration_summary_logged{_RESET}")
         self.logger.info(
             f"{_YELLOW}[FLOW] iteration_duration={time.perf_counter() - iter_start:.4f}s "
             f"orders={orders_submitted} cache_hit_rate={cache_stats['hit_rate']:.1f}%{_RESET}"
@@ -596,8 +738,18 @@ class MultiStrategyExecutorEnhanced:
         Returns:
             Signal: 'BUY', 'SELL', or 'HOLD'
         """
-        # This will be replaced by dynamic strategy loading
-        # For now, return HOLD
+        # Prefer injected generate_signal_func (set by PortfolioManager.loader)
+        sig_func = getattr(strategy_state, "generate_signal_func", None)
+        if callable(sig_func):
+            try:
+                return sig_func(strategy_state, market_data)
+            except Exception as e:
+                self.logger.error(
+                    f"Signal function failed for {strategy_state.strategy_id}: {e}", exc_info=True
+                )
+                return "HOLD"
+
+        # Fallback: HOLD if no function injected
         return "HOLD"
 
     def _create_bracket_order_for_strategy(
@@ -628,6 +780,10 @@ class MultiStrategyExecutorEnhanced:
             # Calculate bracket prices based on ATR
             tp_price, sl_price = self._compute_bracket_prices(market_data, strategy_state, side)
 
+            # Stash targets for simulated fill tracking
+            strategy_state.pending_tp = tp_price
+            strategy_state.pending_sl = sl_price
+
             # Create bracket order
             order = Order(
                 strategy_state.strategy_id,
@@ -639,6 +795,9 @@ class MultiStrategyExecutorEnhanced:
                 secondary_limit_price=tp_price,  # Take profit
                 secondary_stop_price=sl_price,  # Stop loss
             )
+            order.tag = strategy_state.strategy_id
+            if self.broker_strategy_name:
+                order.strategy = self.broker_strategy_name
 
             self.logger.info(
                 f"Created bracket order for {strategy_state.strategy_id}: "
@@ -679,6 +838,10 @@ class MultiStrategyExecutorEnhanced:
             else:
                 return None
 
+            order.tag = strategy_state.strategy_id
+            if self.broker_strategy_name:
+                order.strategy = self.broker_strategy_name
+
             return order
 
         except Exception as e:
@@ -698,7 +861,18 @@ class MultiStrategyExecutorEnhanced:
         """
         orders_submitted = 0
 
-        for strategy_state, order, is_close, reason in orders_to_submit:
+        if len(orders_to_submit) == 0:
+            self.logger.info("No orders to submit this iteration.")
+            return 0
+        else:
+            self.logger.info(f"Submitting {len(orders_to_submit)} orders (simulate_fills={self.simulate_fills})")
+
+        for item in orders_to_submit:
+            if len(item) == 5:
+                strategy_state, order, is_close, reason, fill_override = item
+            else:
+                strategy_state, order, is_close, reason = item
+                fill_override = None
             try:
                 # Wait for rate limit
                 wait_time = self.rate_limiter.wait_if_needed()
@@ -708,6 +882,10 @@ class MultiStrategyExecutorEnhanced:
                         f"Rate limited: waited {wait_time:.2f}s before "
                         f"submitting order for {strategy_state.strategy_id}"
                     )
+
+                # Capture position before we mutate it so we can detect closes/reversals
+                pos_before = strategy_state.tracker.get_position(strategy_state.symbol)
+                qty_before = pos_before.quantity if pos_before else 0.0
 
                 # Submit order to broker unless simulating fills or broker missing
                 mark_submitted = False
@@ -734,8 +912,10 @@ class MultiStrategyExecutorEnhanced:
                     self.rate_limiter.mark_order_submitted()
 
                 # Update virtual position immediately (assume market orders fill)
-                # Get current price from cached data
-                market_data = self.shared_data.get_cached_data(strategy_state.symbol, 100, self.timestep)
+                # Get current price from cached data (use shared lookback)
+                    market_data = self.shared_data.get_cached_data(
+                        strategy_state.symbol, self.max_lookback, self.timestep
+                    )
 
                 if market_data is not None:
                     if hasattr(market_data, "df"):
@@ -755,39 +935,94 @@ class MultiStrategyExecutorEnhanced:
                         )
                         continue
 
-                    # Assume fill at last close price
-                    current_price = float(df["close"].iloc[-1])
-                    if len(df.index) > 0:
-                        bar_time = df.index[-1]
-                    else:
-                        # Fallback to current iteration time if index missing
-                        bar_time = current_time
+                    # Pick price at or before current_time (not end-of-period) to avoid future-looking fills
+                    bar_time = None
+                    fill_price = None
+                    try:
+                        idx = df.index
+                        ct = pd.Timestamp(current_time)
+                        if getattr(idx, "tz", None) is not None:
+                            if ct.tzinfo is None:
+                                ct = ct.tz_localize(idx.tz)
+                            elif ct.tzinfo != idx.tz:
+                                ct = ct.tz_convert(idx.tz)
+                        else:
+                            if ct.tzinfo is not None:
+                                ct = ct.tz_convert(None)
+
+                        pos = idx.searchsorted(ct, side="right")
+                        if pos > 0:
+                            row = df.iloc[pos - 1]
+                            bar_time = getattr(row, "name", ct)
+                            fill_price = float(row["close"])
+                    except Exception:
+                        bar_time = None
+                        fill_price = None
+
+                    if fill_override is not None:
+                        fill_price = float(fill_override)
+                        bar_time = df.index[-1] if len(df.index) > 0 else current_time
+                    if fill_price is None:
+                        # Fallback: use last bar in the frame
+                        fill_price = float(df["close"].iloc[-1])
+                        bar_time = df.index[-1] if len(df.index) > 0 else current_time
+                    current_price = fill_price
 
                     # Simulated virtual fill
                     strategy_state.tracker.execute_order(
                         strategy_state.symbol, order.quantity, order.side, current_price
                     )
-                    strategy_state.trade_count += 1
 
-                    # Track entry time and price for new positions
-                    if not is_close and reason == "entry":
-                        strategy_state.entry_time = bar_time
-                        strategy_state.entry_price = current_price
-                        strategy_state.bars_in_trade = 0
+                    # Track entry/exit bookkeeping
+                    pos_after = strategy_state.tracker.get_position(strategy_state.symbol)
+                    qty_after = pos_after.quantity if pos_after else 0.0
 
-                    # Clear entry tracking for closes and realize P&L
-                    if is_close:
-                        if strategy_state.entry_price is not None:
-                            qty_closed = order.quantity
-                            if order.side == "sell":  # closing long
-                                realized = (current_price - strategy_state.entry_price) * qty_closed
-                            else:  # buy to cover short
-                                realized = (strategy_state.entry_price - current_price) * qty_closed
-                            strategy_state.realized_pnl += realized
+                    # Reversal or flattening: close prior position if we had one
+                    if qty_before != 0 and (qty_after == 0 or qty_before * qty_after < 0):
+                        entry_price = strategy_state.entry_price if strategy_state.entry_price is not None else current_price
+                        realized = (current_price - entry_price) * qty_before
+                        strategy_state.realized_pnl += realized
+                        self.attribution.record_trade(
+                            strategy_state.strategy_id,
+                            entry_price,
+                            current_price,
+                            qty_before,
+                            timestamp=bar_time,
+                        )
+                        strategy_state.trade_history.append(
+                            {
+                                "timestamp": bar_time,
+                                "entry_price": entry_price,
+                                "exit_price": current_price,
+                                "quantity": qty_before,
+                                "pnl": realized,
+                            }
+                        )
                         strategy_state.trade_count += 1
+                        # Reset entry tracking after a close/reversal
                         strategy_state.entry_time = None
                         strategy_state.entry_price = None
+                        strategy_state.entry_iteration = None
+                        strategy_state.entry_side = None
+                        strategy_state.take_profit_price = None
+                        strategy_state.stop_loss_price = None
                         strategy_state.bars_in_trade = 0
+
+                    # New entry (including reversal opening leg)
+                    if (qty_after != 0 and qty_before == 0) or (qty_before * qty_after < 0):
+                        strategy_state.entry_time = bar_time
+                        strategy_state.entry_price = current_price
+                        strategy_state.entry_iteration = self.iteration_count
+                        strategy_state.bars_in_trade = 0
+                        strategy_state.entry_side = order.side
+                        strategy_state.take_profit_price = getattr(strategy_state, "pending_tp", None)
+                        strategy_state.stop_loss_price = getattr(strategy_state, "pending_sl", None)
+                        strategy_state.pending_tp = None
+                        strategy_state.pending_sl = None
+
+                    # If we simply added to an existing position, keep the original entry but refresh bars counter
+                    if qty_after != 0 and qty_before == qty_after and qty_after != 0:
+                        strategy_state.bars_in_trade = max(strategy_state.bars_in_trade, 0)
 
                     self.logger.debug(
                         f"Updated virtual position for {strategy_state.strategy_id}: "
@@ -856,6 +1091,33 @@ class MultiStrategyExecutorEnhanced:
             "best_strategy": self.attribution.get_best_strategy(),
             "worst_strategy": self.attribution.get_worst_strategy(),
         }
+
+    def force_flatten(self, current_time: Optional[datetime] = None) -> int:
+        """
+        Force-close all open positions using the latest cached prices.
+
+        Args:
+            current_time: Timestamp used for the close (defaults to now)
+
+        Returns:
+            Number of close orders executed.
+        """
+        if current_time is None:
+            current_time = datetime.now()
+
+        orders: List[tuple] = []
+        for state in self.strategies:
+            pos = state.tracker.get_position(state.symbol)
+            if pos and pos.quantity != 0:
+                close_order = self._create_close_order(state, pos.quantity)
+                if close_order:
+                    orders.append((state, close_order, True, "force_flatten", None))
+
+        if orders:
+            self.logger.info(f"Forcing flatten of {len(orders)} open positions at end of run")
+            return self._execute_all_orders(orders, current_time)
+
+        return 0
 
     def __repr__(self) -> str:
         """String representation of executor."""

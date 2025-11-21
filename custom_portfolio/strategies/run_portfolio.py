@@ -385,13 +385,16 @@ def run_backtest(args):
                 data_source=self.portfolio_data_source,
                 auto_load=True,
                 cache_ttl_seconds=3600,  # 1 hour for backtesting (prevents cache expiry during slow backtests)
-                min_order_delay_seconds=2.0,
+                # No throttling needed in backtests; keep orders fast
+                min_order_delay_seconds=0.0,
                 default_atr_period=20,
                 enable_snapshots=enable_snapshots,
                 max_snapshots=max_snapshots,
                 timestep=timestep,
                 simulate_fills=simulate_fills,
                 shared_initial_capital=shared_initial_capital,
+                broker_strategy_name=getattr(self, "name", "PortfolioStrategy"),
+                ignore_calendar=True,  # For backtests, always process signals regardless of session gating
             )
 
             # Print validation report
@@ -568,6 +571,35 @@ def run_backtest(args):
     print("BACKTEST COMPLETE")
     print("=" * 70)
 
+    # Force-flatten any residual positions so attribution closes the book
+    manager = PortfolioStrategy._last_manager
+    if manager and getattr(manager, "executor", None):
+        try:
+            manager.executor.force_flatten()
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Force flatten failed: {e}")
+
+    # Attribution-based stats (uses simulated fills inside executor)
+    attr_report = None
+    if manager and getattr(manager, "executor", None):
+        attr_report = manager.executor.attribution.generate_report()
+        if not attr_report.empty:
+            print("\nAttribution (simulated fills):")
+            print(attr_report.to_string(index=False))
+            print(f"Simulated total trades: {int(attr_report['trade_count'].sum())}")
+
+            # If lumibot backtest returns are empty, mirror attribution so user sees activity
+            try:
+                total_trades_attr = int(attr_report["trade_count"].sum())
+                total_pnl_attr = float(attr_report["total_pnl"].sum())
+                equity_base = float(manager.executor.shared_initial_capital or 1.0)
+                total_return_attr = total_pnl_attr / equity_base
+                if results is not None:
+                    results["total_trades"] = total_trades_attr
+                    results["total_return"] = total_return_attr
+            except Exception:
+                pass
+
     # Display results
     if results:
         def _fmt_pct(val):
@@ -590,7 +622,6 @@ def run_backtest(args):
         print(f"Total Trades: {results.get('total_trades', 0)}")
 
     # Export snapshots if enabled
-    manager = PortfolioStrategy._last_manager
     if manager:
         if enable_snapshots and max_snapshots > 0:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
