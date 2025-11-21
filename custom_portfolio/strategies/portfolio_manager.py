@@ -355,6 +355,15 @@ class PortfolioManager:
             self.load_errors.append({"file": file_name, "error": load_error})
             return False
 
+        # Auto-derive strategy_id from filename if missing/empty
+        try:
+            if hasattr(module, "STRATEGY_CONFIG") and isinstance(module.STRATEGY_CONFIG, dict):
+                cfg = module.STRATEGY_CONFIG
+                if not cfg.get("strategy_id"):
+                    cfg["strategy_id"] = self._sanitize_strategy_id(file_path.stem)
+        except Exception:
+            pass
+
         # Validate the module
         is_valid, validation_error = self.loader.validate_strategy_module(module, file_name)
         if not is_valid:
@@ -451,8 +460,8 @@ class PortfolioManager:
                 # Store generate_signal function reference
                 "_generate_signal_func": sig_func,
                 # Store bracket and exit configs
-                "_bracket_config": config.get("bracket_config", {}),
-                "_exit_config": config.get("exit_config", {}),
+                "_bracket_config": config.get("bracket_orders") or config.get("bracket_config", {}),
+                "_exit_config": config.get("time_exit") or config.get("exit_config", {}),
             }
 
             # Merge bracket config into params for executor
@@ -738,9 +747,9 @@ class PortfolioManager:
             }
 
             # Add metadata if available (excluding author and risk_level)
-            if "metadata" in config:
-                meta = config["metadata"]
-                row["type"] = meta.get("strategy_type", "unknown")
+            meta = config.get("metadata") or {}
+            row["type"] = meta.get("strategy_type", meta.get("direction", "unknown"))
+            row["direction"] = meta.get("direction", "n/a")
 
             # Add bracket config info
             bracket = config.get("bracket_config", {})
@@ -839,3 +848,9 @@ class PortfolioManager:
     def __repr__(self) -> str:
         """String representation of PortfolioManager."""
         return f"PortfolioManager(" f"strategies={len(self.loaded_strategies)}, " f"folder='{self.strategies_folder}')"
+
+    @staticmethod
+    def _sanitize_strategy_id(stem: str) -> str:
+        import re
+        safe = re.sub(r"[^A-Za-z0-9_]+", "_", stem).strip("_")
+        return safe or stem

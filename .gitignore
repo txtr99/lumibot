@@ -60,3 +60,4 @@ schwab_token.json
 user_data/
 *.log
 snapshots/
+*.png

@@ -158,6 +158,12 @@ from pathlib import Path
 repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
+import pandas as pd  # noqa: E402
+import matplotlib
+
+matplotlib.use("Agg")  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+
 from custom_portfolio.strategies.portfolio_manager import PortfolioManager  # noqa: E402
 from lumibot.backtesting import DataBentoDataBacktesting  # noqa: E402
 from lumibot.entities import TradingFee  # noqa: E402
@@ -248,6 +254,180 @@ def _visual_config():
     return show_plot, show_tearsheet, show_indicators
 
 
+def _load_validation_data(symbol: str, min_bars: int = 300):
+    """
+    Load sample validation data for a strategy.
+
+    Priority order:
+      1. custom data matching symbol: validation_data/{symbol}.csv
+      2. shared fall-back file: validation_data/validation.csv
+    """
+    base_dir = Path("custom_portfolio/strategies/templates/validation_data")
+    specific_path = base_dir / f"{symbol}.csv"
+    fallback_path = base_dir / "validation.csv"
+
+    if specific_path.exists():
+        candidate_paths = [specific_path]
+    else:
+        candidate_paths = []
+    if fallback_path.exists():
+        candidate_paths.append(fallback_path)
+
+    if not candidate_paths:
+        print(f"[VALIDATE] Missing validation data for {symbol}: tried {specific_path} and {fallback_path}")
+        return None
+
+    try:
+        df = pd.read_csv(candidate_paths[0])
+        if "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            df = df.set_index("timestamp")
+        else:
+            # assume first column is datetime
+            df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0])
+            df = df.set_index(df.columns[0])
+        # basic sanity check
+        if len(df) < min_bars:
+            print(
+                f"[VALIDATE] Not enough rows in {candidate_paths[0]} (len={len(df)}); need >= {min_bars}"
+            )
+            return None
+        if candidate_paths[0] == fallback_path and not specific_path.exists():
+            print(
+                f"[VALIDATE] Using shared validation.csv for symbol {symbol} "
+                f"(add {specific_path.name} to override)."
+            )
+        return df
+    except Exception as exc:
+        print(f"[VALIDATE] Failed to read {candidate_paths[0]}: {exc}")
+        return None
+
+
+def run_signal_validation(portfolio_manager: PortfolioManager, plot_signals: bool = False, plot_symbols: bool = False):
+    """
+    For each loaded strategy, run over sample data and count BUY/SELL signals.
+    Optionally plot price + signals to PNG under signal-plots/.
+    """
+    min_bars = 300
+    loaded = portfolio_manager.loaded_strategies
+    if not loaded:
+        print("[VALIDATE] No strategies loaded; skipping signal validation.")
+        return
+
+    # prepare plot folder
+    plot_dir = Path("signal-plots")
+    if plot_signals or plot_symbols:
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        for f in plot_dir.glob("*.png"):
+            try:
+                f.unlink()
+            except Exception:
+                pass
+
+    symbol_data_cache = {}
+
+    from custom_portfolio.tools.terminal_formatter import TerminalFormatter as TF
+
+    print("\n[VALIDATE] Signal counts on sample data:")
+    summary_rows = []
+
+    for sid, cfg in loaded.items():
+        symbol = cfg.get("symbol")
+        sig_fn = cfg.get("_generate_signal_func") or cfg.get("generate_signal_func")
+        if not callable(sig_fn):
+            print(f"- {sid}: missing generate_signal; skipping")
+            continue
+
+        # load data once per symbol
+        if symbol in symbol_data_cache:
+            df = symbol_data_cache[symbol]
+        else:
+            df = _load_validation_data(symbol, min_bars=min_bars)
+            symbol_data_cache[symbol] = df
+        if df is None:
+            print(f"- {sid}: no data for {symbol}; skipping")
+            continue
+
+        # merge params with bracket/time for convenience
+        params = {}
+        params.update(cfg.get("params", {}))
+        params.update(cfg.get("bracket_orders") or cfg.get("bracket_config") or {})
+        params.update(cfg.get("time_exit") or cfg.get("exit_config") or {})
+
+        class _State:
+            def __init__(self, params):
+                self.params = params
+
+        state = _State(params)
+
+        buy_times = []
+        sell_times = []
+        buy_prices = []
+        sell_prices = []
+        buys = sells = 0
+
+        closes = df["close"]
+        for i in range(min_bars, len(df)):
+            window = df.iloc[: i + 1]
+            signal = sig_fn(state, window)
+            price = closes.iloc[i]
+            ts = window.index[-1]
+            if signal == "BUY":
+                buys += 1
+                buy_times.append(ts)
+                buy_prices.append(price)
+            elif signal == "SELL":
+                sells += 1
+                sell_times.append(ts)
+                sell_prices.append(price)
+
+        print(f"- {sid} [{symbol}]: BUY={buys} SELL={sells} rows={len(df)}")
+        holds = max(len(df) - buys - sells, 0)
+        summary_rows.append(
+            {
+                "strategy_id": sid,
+                "symbol": symbol,
+                "buy": buys,
+                "sell": sells,
+                "hold": holds,
+                "rows": len(df),
+            }
+        )
+
+        if (plot_signals or plot_symbols) and len(df) > 0:
+            plt.figure(figsize=(10, 4))
+            plt.plot(df.index, df["close"], label="Close", color="blue", linewidth=1.0)
+            if plot_signals:
+                if buy_times:
+                    plt.scatter(buy_times, buy_prices, marker="^", color="green", label="BUY", s=25)
+                if sell_times:
+                    plt.scatter(sell_times, sell_prices, marker="v", color="red", label="SELL", s=25)
+            plt.legend()
+            plt.title(f"{sid} ({symbol}) signals")
+            plt.tight_layout()
+            out_path = plot_dir / f"{sid}.png"
+            try:
+                plt.savefig(out_path)
+            except Exception as exc:
+                print(f"[VALIDATE] Failed to save plot {out_path}: {exc}")
+            plt.close()
+
+    if summary_rows:
+        print("")
+        print(TF.section_header("Signal Summary"))
+        headers = ["Symbol", "Strategy ID", "BUY", "SELL", "HOLD", "Rows"]
+        rows = [
+            [
+                r["symbol"],
+                r["strategy_id"],
+                str(r["buy"]),
+                str(r["sell"]),
+                str(r["hold"]),
+                str(r["rows"]),
+            ]
+            for r in summary_rows
+        ]
+        print(TF.table(headers, rows))
 def create_broker_for_backtesting():
     """Create a broker instance for backtesting."""
     # For backtesting, we typically don't need a real broker
@@ -685,7 +865,6 @@ def run_live(args):
     simulate_fills = _simulate_fills_config()
     shared_initial_capital = _capital_config()
     deep_portfolio_debug = _deep_debug_config()
-    fill_price_mode = "close"
 
     # Confirmation prompt
     confirm = input("Are you sure you want to run in LIVE mode? (yes/no): ")
@@ -807,6 +986,10 @@ def validate_only(args):
     # Print validation report (includes all formatting and final status)
     print(portfolio_manager.get_validation_report())
 
+    # Run sample-data signal sweep and optional plotting
+    if args.plot_signals or args.plot_symbols:
+        run_signal_validation(portfolio_manager, plot_signals=args.plot_signals, plot_symbols=args.plot_symbols)
+
     # Print loaded strategies summary as table
     summary_df = portfolio_manager.get_loaded_strategies_summary()
     if not summary_df.empty:
@@ -815,7 +998,7 @@ def validate_only(args):
         print("")
 
         # Create table with only key columns
-        headers = ["Symbol", "Strategy ID", "Session", "Qty", "Params", "Type"]
+        headers = ["Symbol", "Strategy ID", "Session", "Qty", "Params", "Type", "Direction"]
         rows = []
         for _, row in summary_df.iterrows():
             rows.append(
@@ -826,6 +1009,7 @@ def validate_only(args):
                     str(row["qty"]),
                     str(row["params"]),
                     str(row.get("type", "unknown")),
+                    str(row.get("direction", "n/a")),
                 ]
             )
 
@@ -878,6 +1062,16 @@ def main():
         choices=["backtest", "live", "validate", "archive"],
         default="validate",
         help="Operation mode (default: validate)",
+    )
+    parser.add_argument(
+        "--plot-signals",
+        action="store_true",
+        help="During validate: run sample data through each strategy and save signal plots",
+    )
+    parser.add_argument(
+        "--plot-symbols",
+        action="store_true",
+        help="During validate: plot price-only charts from sample data; ignored otherwise",
     )
 
     # Logging

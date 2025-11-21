@@ -221,7 +221,7 @@ class MultiStrategyExecutorEnhanced:
         self.broker_strategy_name = broker_strategy_name
         self.deep_portfolio_debug = deep_portfolio_debug
         self.total_initial_capital = shared_initial_capital
-        self.fill_price_mode = "close"
+        self.min_bars = 300  # unified minimum bars gate for signal generation
 
         # Dictionary to hold loaded strategy modules for dynamic loading
         self.strategy_modules = {}
@@ -613,6 +613,10 @@ class MultiStrategyExecutorEnhanced:
                 virtual_qty = virtual_pos.quantity if virtual_pos else 0.0
                 if virtual_qty != 0:
                     strategy_state.bars_in_trade += 1
+
+                # If flat and not enough history, skip new entries (still allow exits if position exists)
+                if virtual_qty == 0 and len(df) < self.min_bars:
+                    continue
 
                 # 2b. If already in position, first check for bracket hits
                 if virtual_qty != 0:
