@@ -58,16 +58,18 @@ class SharedDataManager:
         >>> nq_data = manager.get_cached_data('NQ', 100, '1M')
     """
 
-    def __init__(self, data_source, cache_ttl_seconds: int = 60):
+    def __init__(self, data_source, cache_ttl_seconds: int = 60, verbose_logging: bool = False):
         """
         Initialize the SharedDataManager.
 
         Args:
             data_source: DataSource instance for fetching market data
             cache_ttl_seconds: Time-to-live for cached data in seconds (default: 60)
+            verbose_logging: Emit info-level SDM logs when True (default: False)
         """
         self.data_source = data_source
         self.cache_ttl_seconds = cache_ttl_seconds
+        self.verbose_logging = verbose_logging
 
         # Cache storage: {cache_key: data}
         self.cache: Dict[str, any] = {}
@@ -85,6 +87,14 @@ class SharedDataManager:
 
         # Logger
         self.logger = logging.getLogger(__name__)
+
+    def _log_verbose(self, message: str, level: str = "info") -> None:
+        """Route SDM logs through deep-debug toggle to avoid noisy info logs."""
+        if self.verbose_logging:
+            log_method = getattr(self.logger, level.lower(), self.logger.info)
+            log_method(message)
+        else:
+            self.logger.debug(message)
 
     def _create_cache_key(self, symbol: str, length: int, timestep: str) -> str:
         """
@@ -165,7 +175,7 @@ class SharedDataManager:
         """
         fetch_start = time.perf_counter()
         debug_enabled = self.logger.isEnabledFor(logging.DEBUG)
-        self.logger.info(
+        self._log_verbose(
             f"[SDM] fetch_for_all_strategies start symbols={symbols} length={length} timestep={timestep} asset_type={asset_type}"
         )
         phase1_start = time.perf_counter()
@@ -174,10 +184,10 @@ class SharedDataManager:
         all_cached_flag = False
         try:
             # Phase 1 (under lock): determine which symbols need fetching and fill from prefetched store
-            self.logger.info("[SDM] acquiring lock for phase1")
+            self._log_verbose("[SDM] acquiring lock for phase1")
             lock_wait_start = time.perf_counter()
             with self.lock:
-                self.logger.info(
+                self._log_verbose(
                     f"[SDM] lock acquired in {time.perf_counter() - lock_wait_start:.6f}s"
                 )
                 unique_symbols = list(set(symbols))
@@ -208,7 +218,7 @@ class SharedDataManager:
                         self.cache[cache_key] = prefetched
                         self.last_fetch[cache_key] = time.time()
                         self.total_fetches += 1
-                        self.logger.info(f"[SDM] Cached prefetched data for {cache_key}")
+                        self._log_verbose(f"[SDM] Cached prefetched data for {cache_key}")
                         continue
 
                     self.cache_misses += 1
@@ -216,7 +226,7 @@ class SharedDataManager:
                     if debug_enabled:
                         self.logger.debug(f"[SDM] marked for fetch symbol={symbol} cache_key={cache_key}")
 
-                self.logger.info(
+                self._log_verbose(
                     f"[SDM] phase1 complete all_cached={all_cached} to_fetch={to_fetch} "
                     f"duration={time.perf_counter() - phase1_start:.6f}s"
                 )
@@ -230,7 +240,7 @@ class SharedDataManager:
                 )
 
         if all_cached_flag and not to_fetch:
-            self.logger.info(
+            self._log_verbose(
                 f"[SDM] all_cached fast-exit duration={time.perf_counter() - fetch_start:.4f}s "
                 f"cache_stats={self.get_cache_stats()}"
             )
@@ -278,7 +288,9 @@ class SharedDataManager:
                 )
                 continue
 
-            self.logger.info(f"[SDM] No prefetched/store data for {symbol}; fetching from API")
+            self._log_verbose(
+                f"[SDM] No prefetched/store data for {symbol}; fetching from API"
+            )
             try:
                 asset = Asset(symbol, asset_type=asset_type)
                 data = self.data_source.get_historical_prices(asset, length, timestep)
@@ -296,7 +308,7 @@ class SharedDataManager:
                 self.logger.error(f"Failed to fetch data for {symbol}: {e}")
                 continue
 
-        self.logger.info(
+        self._log_verbose(
             f"[SDM] fetch_for_all_strategies done in {time.perf_counter() - fetch_start:.4f}s "
             f"cache_stats={self.get_cache_stats()}"
         )

@@ -158,18 +158,18 @@ from pathlib import Path
 repo_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(repo_root))
 
+import matplotlib  # noqa: E402
 import pandas as pd  # noqa: E402
-import matplotlib
 
 matplotlib.use("Agg")  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 
 from custom_portfolio.strategies.portfolio_manager import PortfolioManager  # noqa: E402
-from lumibot.backtesting import DataBentoDataBacktesting  # noqa: E402
+from lumibot.backtesting import (  # noqa: E402
+    DataBentoDataBacktestingPandas,
+)
 from lumibot.entities import TradingFee  # noqa: E402
 from lumibot.strategies import Strategy  # noqa: E402
-from lumibot.backtesting import DataBentoDataBacktesting as DBDataSource  # type: ignore # noqa: E402
-from lumibot.backtesting import DataBentoDataBacktestingPandas  # noqa: E402
 
 # Global flag for interrupt handling
 _interrupted = False
@@ -254,13 +254,18 @@ def _visual_config():
     return show_plot, show_tearsheet, show_indicators
 
 
-def _load_validation_data(symbol: str, min_bars: int = 300):
+def _load_validation_data(symbol: str, min_bars: int = 300, max_rows: int = 2000):
     """
     Load sample validation data for a strategy.
 
     Priority order:
       1. custom data matching symbol: validation_data/{symbol}.csv
       2. shared fall-back file: validation_data/validation.csv
+
+    Args:
+        symbol: Symbol to load data for
+        min_bars: Minimum number of bars required
+        max_rows: Maximum number of rows to use (to keep validation fast)
     """
     base_dir = Path("custom_portfolio/strategies/templates/validation_data")
     specific_path = base_dir / f"{symbol}.csv"
@@ -286,11 +291,15 @@ def _load_validation_data(symbol: str, min_bars: int = 300):
             # assume first column is datetime
             df.iloc[:, 0] = pd.to_datetime(df.iloc[:, 0])
             df = df.set_index(df.columns[0])
+
+        # Limit data size for faster validation (use most recent data)
+        if len(df) > max_rows:
+            print(f"[VALIDATE] Limiting {symbol} data from {len(df)} to {max_rows} rows for faster validation")
+            df = df.tail(max_rows)
+
         # basic sanity check
         if len(df) < min_bars:
-            print(
-                f"[VALIDATE] Not enough rows in {candidate_paths[0]} (len={len(df)}); need >= {min_bars}"
-            )
+            print(f"[VALIDATE] Not enough rows in {candidate_paths[0]} (len={len(df)}); need >= {min_bars}")
             return None
         if candidate_paths[0] == fallback_path and not specific_path.exists():
             print(
@@ -428,6 +437,8 @@ def run_signal_validation(portfolio_manager: PortfolioManager, plot_signals: boo
             for r in summary_rows
         ]
         print(TF.table(headers, rows))
+
+
 def create_broker_for_backtesting():
     """Create a broker instance for backtesting."""
     # For backtesting, we typically don't need a real broker
@@ -439,25 +450,45 @@ def create_broker_for_live():
     """
     Create a broker instance for live trading.
 
-    This example uses Alpaca, but you can replace with your broker.
+    Uses ProjectX broker with TopStepX (or other supported firms).
+    Configuration is loaded automatically from environment variables:
+    - PROJECTX_TOPSTEPX_USERNAME
+    - PROJECTX_TOPSTEPX_API_KEY
+    - PROJECTX_TOPSTEPX_PREFERRED_ACCOUNT_NAME
     """
-    # Example for Alpaca (replace with your credentials)
-    # from lumibot.brokers import Alpaca
-
-    # ALPACA_CONFIG = {
-    #     "API_KEY": os.environ.get("ALPACA_API_KEY"),
-    #     "API_SECRET": os.environ.get("ALPACA_SECRET_KEY"),
-    #     "PAPER": True  # Set to False for real trading
-    # }
-
-    # broker = Alpaca(ALPACA_CONFIG)
-    # return broker
-
     from custom_portfolio.tools.terminal_formatter import TerminalFormatter as TF
+    from lumibot.brokers import ProjectX
+    from lumibot.data_sources import ProjectXData
 
-    # For now, return None (replace with actual broker setup)
-    print(TF.warning("Live trading broker not configured. Please set up your broker in run_portfolio.py"))
-    return None
+    try:
+        # Create data source first (required by broker)
+        # ProjectXData will automatically detect configuration from environment variables
+        data_source = ProjectXData(
+            config=None,  # Auto-detect from environment variables
+            firm=None,  # Auto-detect firm from environment variables
+        )
+        print(TF.success("ProjectXData source initialized successfully"))
+
+        # Create broker with the data source
+        # ProjectX will automatically load configuration from environment variables
+        # It detects the firm (e.g., TOPSTEPX) based on the env var prefix
+        broker = ProjectX(
+            config=None,  # Auto-detect from environment variables
+            data_source=data_source,  # Pass the data source
+            connect_stream=True,  # Enable streaming for live data
+            max_workers=20,  # Thread pool size
+            firm=None,  # Auto-detect firm from environment variables
+        )
+
+        print(TF.success(f"ProjectX broker initialized successfully (firm: {broker.firm})"))
+        return broker
+
+    except Exception as e:
+        print(TF.error(f"Failed to initialize ProjectX broker: {e}"))
+        import traceback
+
+        print(traceback.format_exc())
+        return None
 
 
 def create_data_source_for_backtesting():
@@ -470,16 +501,29 @@ def create_data_source_for_live():
     """
     Create data source for live trading.
 
-    This could be your broker's data feed or a separate data provider.
+    Uses ProjectXData which connects to the same ProjectX broker for market data.
+    Configuration is loaded automatically from environment variables.
     """
-    # Example: Use broker's data (if supported)
-    # Or use a separate data provider like Polygon, IEX, etc.
-
     from custom_portfolio.tools.terminal_formatter import TerminalFormatter as TF
+    from lumibot.data_sources import ProjectXData
 
-    # For now, return None (replace with actual data source)
-    print(TF.warning("Live data source not configured. Please set up your data source in run_portfolio.py"))
-    return None
+    try:
+        # ProjectXData will automatically use the same configuration as the broker
+        # It will detect the firm and use the appropriate credentials
+        data_source = ProjectXData(
+            config=None,  # Auto-detect from environment variables
+            firm=None,  # Auto-detect firm from environment variables
+        )
+
+        print(TF.success("ProjectXData source initialized successfully"))
+        return data_source
+
+    except Exception as e:
+        print(TF.error(f"Failed to initialize ProjectXData source: {e}"))
+        import traceback
+
+        print(traceback.format_exc())
+        return None
 
 
 def create_calendar():
@@ -634,11 +678,7 @@ def run_backtest(args):
                 elif hasattr(self.portfolio_data_source, "prefetch_data"):
                     self.portfolio_data_source.prefetch_data(assets, timestep="minute")
                     elapsed = time.perf_counter() - start_prefetch
-                    print(
-                        TF.success(
-                            f"Data prefetch complete in {elapsed:.2f}s for {len(symbols)} symbols"
-                        )
-                    )
+                    print(TF.success(f"Data prefetch complete in {elapsed:.2f}s for {len(symbols)} symbols"))
                 # TODO: allow timestep override beyond 'minute' if multi-timeframe support is added later
 
             self.sleeptime = "1M"  # 1-minute bars
@@ -652,7 +692,11 @@ def run_backtest(args):
             if mgr and getattr(mgr, "executor", None):
                 attr = mgr.executor.attribution.generate_report()
                 if attr is not None and not attr.empty:
-                    equity_base = float(attr["initial_capital"].sum()) if "initial_capital" in attr.columns else float(getattr(mgr.executor, "total_initial_capital", PortfolioStrategy._base_capital))
+                    equity_base = (
+                        float(attr["initial_capital"].sum())
+                        if "initial_capital" in attr.columns
+                        else float(getattr(mgr.executor, "total_initial_capital", PortfolioStrategy._base_capital))
+                    )
                     total_pnl = float(attr["total_pnl"].sum())
                     return equity_base + total_pnl
             return super().get_portfolio_value()
@@ -715,7 +759,9 @@ def run_backtest(args):
                     )
             self.portfolio_manager.run_iteration(current_time)
             if self.debug_logs_enabled:
-                print(f"[DEBUG] Iteration {self._iteration_counter} completed at {datetime.now().isoformat()}", flush=True)
+                print(
+                    f"[DEBUG] Iteration {self._iteration_counter} completed at {datetime.now().isoformat()}", flush=True
+                )
 
         def on_abrupt_closing(self):
             """Handle abrupt closing."""
@@ -746,7 +792,7 @@ def run_backtest(args):
             save_tearsheet=False,
             show_progress_bar=True,
         )
-    except (Exception,) as e:
+    except Exception as e:
         import numpy.linalg
 
         # If visualization fails (e.g., KDE on empty returns), retry once without plots/tearsheet to finish the run
@@ -804,7 +850,15 @@ def run_backtest(args):
                 total_pnl_attr = float(attr_report["total_pnl"].sum())
                 total_fees_attr = float(attr_report["total_fees"].sum()) if "total_fees" in attr_report.columns else 0.0
                 # Sum initial capital across strategies (executor registers per-strategy share)
-                equity_base = float(attr_report["initial_capital"].sum()) if "initial_capital" in attr_report.columns else float(getattr(manager.executor, "total_initial_capital", manager.executor.shared_initial_capital or 1.0))
+                equity_base = (
+                    float(attr_report["initial_capital"].sum())
+                    if "initial_capital" in attr_report.columns
+                    else float(
+                        getattr(
+                            manager.executor, "total_initial_capital", manager.executor.shared_initial_capital or 1.0
+                        )
+                    )
+                )
                 total_return_attr = total_pnl_attr / equity_base if equity_base else 0.0
                 if results is not None:
                     results["total_trades"] = total_trades_attr
@@ -816,6 +870,7 @@ def run_backtest(args):
 
     # Display results
     if results:
+
         def _fmt_pct(val):
             try:
                 return f"{float(val):.2%}"
@@ -872,16 +927,16 @@ def run_live(args):
         print("Live trading cancelled.")
         return
 
-    # Create broker
+    # Create broker (which includes its own data source)
     broker = create_broker_for_live()
     if broker is None:
         print("❌ Broker not configured. Cannot run live trading.")
         return
 
-    # Create data source
-    data_source = create_data_source_for_live()
+    # Use the broker's data source (already created during broker initialization)
+    data_source = broker.data_source
     if data_source is None:
-        print("❌ Data source not configured. Cannot run live trading.")
+        print("❌ Data source not available from broker.")
         return
 
     # Create calendar
@@ -964,6 +1019,7 @@ def validate_only(args):
         args: Command line arguments
     """
     from custom_portfolio.tools.terminal_formatter import TerminalFormatter as TF
+
     enable_snapshots, max_snapshots, timestep = _snapshot_config()
     simulate_fills = _simulate_fills_config()
     shared_initial_capital = _capital_config()

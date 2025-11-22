@@ -36,12 +36,12 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+from custom_portfolio.data.futures_metadata import get_multiplier
+from custom_portfolio.data.topstep_fee_table import get_per_order_fee
 from custom_portfolio.tools.global_rate_limiter import GlobalRateLimiter
 from custom_portfolio.tools.shared_data_manager import SharedDataManager
 from custom_portfolio.tools.strategy_attribution import StrategyAttribution
 from custom_portfolio.tools.strategy_state import StrategyState
-from custom_portfolio.data.topstep_fee_table import get_per_order_fee
-from custom_portfolio.data.futures_metadata import get_multiplier
 from lumibot.entities import Asset, Order
 
 _YELLOW = "\x1b[33m"
@@ -213,7 +213,7 @@ class MultiStrategyExecutorEnhanced:
         self.timestep = timestep
 
         # Initialize shared resources
-        self.shared_data = SharedDataManager(data_source, cache_ttl_seconds)
+        self.shared_data = SharedDataManager(data_source, cache_ttl_seconds, verbose_logging=deep_portfolio_debug)
         self.rate_limiter = GlobalRateLimiter(min_order_delay_seconds)
         self.attribution = StrategyAttribution(max_snapshots=max_snapshots)
         self.shared_initial_capital = shared_initial_capital
@@ -221,7 +221,7 @@ class MultiStrategyExecutorEnhanced:
         self.broker_strategy_name = broker_strategy_name
         self.deep_portfolio_debug = deep_portfolio_debug
         self.total_initial_capital = shared_initial_capital
-        self.min_bars = 300  # unified minimum bars gate for signal generation
+        self.min_bars = 90  # TEMPORARY: reduced for testing (was 300)
 
         # Dictionary to hold loaded strategy modules for dynamic loading
         self.strategy_modules = {}
@@ -232,7 +232,9 @@ class MultiStrategyExecutorEnhanced:
         # Create enhanced strategy states
         self.strategies: List[EnhancedStrategyState] = []
         self.strategy_count = max(1, len(strategy_configs))
-        per_strategy_capital = shared_initial_capital / self.strategy_count if self.strategy_count else shared_initial_capital
+        per_strategy_capital = (
+            shared_initial_capital / self.strategy_count if self.strategy_count else shared_initial_capital
+        )
 
         for config in strategy_configs:
             state = EnhancedStrategyState(
@@ -249,9 +251,7 @@ class MultiStrategyExecutorEnhanced:
             self.strategies.append(state)
 
             # Register with attribution tracker
-            self.attribution.register_strategy(
-                config["strategy_id"], initial_capital=per_strategy_capital
-            )
+            self.attribution.register_strategy(config["strategy_id"], initial_capital=per_strategy_capital)
 
             # Track required lookback (include common indicators)
             p = state.params
@@ -347,16 +347,8 @@ class MultiStrategyExecutorEnhanced:
         # Get ATR parameters from strategy
         atr_period = int(strategy_state.params.get("atr_period", self.default_atr_period))
         # Accept both legacy (pt_mult/sl_mult) and bracket_config keys (profit_target_mult/stop_loss_mult)
-        pt_mult = float(
-            strategy_state.params.get(
-                "pt_mult", strategy_state.params.get("profit_target_mult", 0.0)
-            )
-        )
-        sl_mult = float(
-            strategy_state.params.get(
-                "sl_mult", strategy_state.params.get("stop_loss_mult", 0.0)
-            )
-        )
+        pt_mult = float(strategy_state.params.get("pt_mult", strategy_state.params.get("profit_target_mult", 0.0)))
+        sl_mult = float(strategy_state.params.get("sl_mult", strategy_state.params.get("stop_loss_mult", 0.0)))
         use_tp = bool(strategy_state.params.get("use_atr_profit", True))
         use_sl = bool(strategy_state.params.get("use_atr_stop", True))
 
@@ -524,7 +516,9 @@ class MultiStrategyExecutorEnhanced:
             self.logger.error("No data_source configured; cannot run iteration.")
             return {"error": "data_source_missing"}
 
-        self._log_verbose(f"{_YELLOW}=== Enhanced Multi-Strategy Iteration #{self.iteration_count} at {current_time} ==={_RESET}")
+        self._log_verbose(
+            f"{_YELLOW}=== Enhanced Multi-Strategy Iteration #{self.iteration_count} at {current_time} ==={_RESET}"
+        )
 
         # Statistics for this iteration
         strategies_processed = 0
@@ -555,20 +549,28 @@ class MultiStrategyExecutorEnhanced:
         # Step 2: Process each strategy independently
         for strategy_state in self.strategies:
             try:
+                # DEBUG: Log start of ES_1M_02 processing
+                if strategy_state.strategy_id == "ES_1M_02":
+                    import sys
+
+                    print("\n[DEBUG ES_1M_02] Starting iteration for ES_1M_02", file=sys.stderr, flush=True)
+
                 per_strategy_start = time.perf_counter()
                 # 2a. Get cached data (no API call)
                 self._log_verbose(
                     f"{_YELLOW}[DATA] get_cached_data for {strategy_state.strategy_id} "
                     f"symbol={strategy_state.symbol} len={self.max_lookback} ts={self.timestep}{_RESET}"
                 )
-                market_data = self.shared_data.get_cached_data(
-                    strategy_state.symbol, self.max_lookback, self.timestep
-                )
+                market_data = self.shared_data.get_cached_data(strategy_state.symbol, self.max_lookback, self.timestep)
 
                 if market_data is None:
                     self.logger.warning(
                         f"No cached data for {strategy_state.strategy_id} " f"({strategy_state.symbol}), skipping"
                     )
+                    if strategy_state.strategy_id == "ES_1M_02":
+                        import sys
+
+                        print("  >>> SKIPPING: No cached data", file=sys.stderr, flush=True)
                     continue
 
                 # Convert to DataFrame if needed
@@ -616,6 +618,14 @@ class MultiStrategyExecutorEnhanced:
 
                 # If flat and not enough history, skip new entries (still allow exits if position exists)
                 if virtual_qty == 0 and len(df) < self.min_bars:
+                    if strategy_state.strategy_id == "ES_1M_02":
+                        import sys
+
+                        print(
+                            f"  >>> SKIPPING: Insufficient bars ({len(df)} < {self.min_bars})",
+                            file=sys.stderr,
+                            flush=True,
+                        )
                     continue
 
                 # 2b. If already in position, first check for bracket hits
@@ -651,11 +661,25 @@ class MultiStrategyExecutorEnhanced:
                         allowed_sessions=strategy_state.allowed_sessions,
                     )
 
+                    # DEBUG: Log for ES_1M_02
+                    if strategy_state.strategy_id == "ES_1M_02":
+                        import sys
+
+                        print("\n[DEBUG ES_1M_02] Calendar check:", file=sys.stderr, flush=True)
+                        print(f"  platform_open: {status.platform_open}", file=sys.stderr, flush=True)
+                        print(f"  can_enter_orders: {status.can_enter_orders}", file=sys.stderr, flush=True)
+                        print(f"  must_be_flat: {status.must_be_flat}", file=sys.stderr, flush=True)
+                        print(f"  virtual_qty: {virtual_qty}", file=sys.stderr, flush=True)
+                        if not status.platform_open:
+                            print(f"  platform_reason: {status.platform_reason}", file=sys.stderr, flush=True)
+
                     # 2d. Skip if platform closed
                     if not status.platform_open:
-                        self.logger.debug(
-                            f"{strategy_state.strategy_id}: Platform closed ({status.platform_reason})"
-                        )
+                        self.logger.debug(f"{strategy_state.strategy_id}: Platform closed ({status.platform_reason})")
+                        if strategy_state.strategy_id == "ES_1M_02":
+                            import sys
+
+                            print("  >>> SKIPPING: Platform closed", file=sys.stderr, flush=True)
                         continue
 
                     # 2e. Skip if can't enter new positions
@@ -663,6 +687,10 @@ class MultiStrategyExecutorEnhanced:
                         self.logger.debug(
                             f"{strategy_state.strategy_id}: Cannot enter new orders (session restrictions)"
                         )
+                        if strategy_state.strategy_id == "ES_1M_02":
+                            import sys
+
+                            print("  >>> SKIPPING: Cannot enter orders (session)", file=sys.stderr, flush=True)
                         continue
 
                     # 2f. Force close if required by calendar
@@ -677,9 +705,17 @@ class MultiStrategyExecutorEnhanced:
 
                 # 2g. Skip new signals if already in position
                 if virtual_qty != 0:
+                    if strategy_state.strategy_id == "ES_1M_02":
+                        import sys
+
+                        print(f"  >>> SKIPPING: Already in position (qty={virtual_qty})", file=sys.stderr, flush=True)
                     continue
 
                 # 2h. Generate signal using strategy-specific logic
+                if strategy_state.strategy_id == "ES_1M_02":
+                    import sys
+
+                    print(f"  >>> Passed all gates - generating signal (bars={len(df)})", file=sys.stderr, flush=True)
                 signal = self._generate_signal_for_strategy(strategy_state, df)
                 strategy_state.last_signal = signal
                 strategy_state.last_signal_time = current_time
@@ -772,9 +808,7 @@ class MultiStrategyExecutorEnhanced:
             try:
                 return sig_func(strategy_state, market_data)
             except Exception as e:
-                self.logger.error(
-                    f"Signal function failed for {strategy_state.strategy_id}: {e}", exc_info=True
-                )
+                self.logger.error(f"Signal function failed for {strategy_state.strategy_id}: {e}", exc_info=True)
                 return "HOLD"
 
         # Fallback: HOLD if no function injected
@@ -824,8 +858,9 @@ class MultiStrategyExecutorEnhanced:
                 secondary_stop_price=sl_price,  # Stop loss
             )
             order.tag = strategy_state.strategy_id
-            if self.broker_strategy_name:
-                order.strategy = self.broker_strategy_name
+            # TEMPORARILY COMMENTED OUT - testing if this causes ProjectX order submission errors
+            # if self.broker_strategy_name:
+            #     order.strategy = self.broker_strategy_name
 
             self._log_verbose(
                 f"Created bracket order for {strategy_state.strategy_id}: "
@@ -867,8 +902,9 @@ class MultiStrategyExecutorEnhanced:
                 return None
 
             order.tag = strategy_state.strategy_id
-            if self.broker_strategy_name:
-                order.strategy = self.broker_strategy_name
+            # TEMPORARILY COMMENTED OUT - testing if this causes ProjectX order submission errors
+            # if self.broker_strategy_name:
+            #     order.strategy = self.broker_strategy_name
 
             return order
 
@@ -939,8 +975,8 @@ class MultiStrategyExecutorEnhanced:
                 if mark_submitted:
                     self.rate_limiter.mark_order_submitted()
 
-                # Update virtual position immediately (assume market orders fill)
-                # Get current price from cached data (use shared lookback)
+                    # Update virtual position immediately (assume market orders fill)
+                    # Get current price from cached data (use shared lookback)
                     market_data = self.shared_data.get_cached_data(
                         strategy_state.symbol, self.max_lookback, self.timestep
                     )
@@ -959,7 +995,8 @@ class MultiStrategyExecutorEnhanced:
 
                     if len(df) == 0:
                         self.logger.warning(
-                            f"Empty market data when executing order for {strategy_state.strategy_id}; skipping fill update."
+                            f"Empty market data when executing order for {strategy_state.strategy_id}; "
+                            f"skipping fill update."
                         )
                         continue
 
@@ -1014,7 +1051,9 @@ class MultiStrategyExecutorEnhanced:
 
                     # Reversal or flattening: close prior position if we had one
                     if qty_before != 0 and (qty_after == 0 or qty_before * qty_after < 0):
-                        entry_price = strategy_state.entry_price if strategy_state.entry_price is not None else current_price
+                        entry_price = (
+                            strategy_state.entry_price if strategy_state.entry_price is not None else current_price
+                        )
                         multiplier = get_multiplier(strategy_state.symbol)
                         realized = (current_price - entry_price) * qty_before * multiplier
                         net_realized = realized - strategy_state.fees_since_entry
