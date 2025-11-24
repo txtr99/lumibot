@@ -37,9 +37,12 @@ Enforcement Control:
 - Backtest: Controlled by ENFORCE_SESSIONS_IN_BACKTEST env var (default: true)
 - Live: Always enforced (TopStepX compliance requirement)
 
-Platform Rules (TopStepX):
-- Daily maintenance: 14:00-16:00 CT (no trading)
-- Weekend blackout: Friday 14:00 CT - Sunday 16:00 CT (no trading)
+Platform Rules (TopStepX - Verified 2025-11-24):
+- Daily position closure: Must be flat by 15:10 CT (3:10 PM) Monday-Friday
+- Risk managers start flattening: 15:08 CT (3:08 PM) as courtesy
+- Trading resumes: 17:00 CT (5:00 PM) same day
+- Weekend blackout: Friday 15:10 CT - Sunday 17:00 CT (no trading)
+- CBOT Commodity pause: 07:45-08:30 AM CST (no orders during this window)
 - These override session times (platform layer wins)
 
 STRATEGY CONFIGURATION

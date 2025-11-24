@@ -112,24 +112,35 @@ TRADING_SESSIONS = {
 # CRITICAL: These times must EXACTLY match TopStepX platform rules
 # Violating these rules can result in account violations or termination
 # Reference: https://help.topstep.com/en/articles/8284206
+# Verified: 2025-11-24
 #
-# Platform maintenance: Daily 2:00 PM - 4:00 PM CT (14:00-16:00)
-# Weekend blackout: Friday 2:00 PM CT - Sunday 4:00 PM CT
+# Daily position closure: Must be flat by 3:10 PM CT (Monday-Friday)
+# Risk managers start flattening: 3:08 PM CT as courtesy
+# Trading resumes: 5:00 PM CT same day, Sunday 5:00 PM CT for new week
+# CBOT Commodity pause: 7:45-8:30 AM CST (no orders during this window)
+#
+# CRITICAL: Annual review required to verify TopStepX rules haven't changed
 # ================================================================================
 
 TOPSTEPX_PLATFORM_CONFIG = {
-    "daily_stop_new_orders": "14:00",  # 2:00 PM CT - start of daily maintenance
-    "daily_force_flat": "14:00",  # 2:00 PM CT - must be flat during maintenance
-    "daily_resume": "16:00",  # 4:00 PM CT - maintenance ends, trading resumes
+    "daily_stop_new_orders": "15:08",  # 3:08 PM CT - risk managers start flattening
+    "daily_force_flat": "15:10",  # 3:10 PM CT - HARD DEADLINE for position closure
+    "daily_resume": "17:00",  # 5:00 PM CT - trading resumes same day
     "weekend_close": {
         "day": 4,  # Friday (0=Monday, 4=Friday)
-        "time": "14:00",  # 2:00 PM CT Friday
+        "time": "15:10",  # 3:10 PM CT Friday - must be flat by this time
     },
     "weekend_open": {
         "day": 6,  # Sunday (0=Monday, 6=Sunday)
-        "time": "16:00",  # 4:00 PM CT Sunday
+        "time": "17:00",  # 5:00 PM CT Sunday - trading resumes for new week
     },
-    "description": "TopStepX platform rules - NEVER violate these in live trading",
+    "cbot_commodity_pause": {
+        "start": "07:45",  # 7:45 AM CST - CBOT commodity pause starts
+        "end": "08:30",  # 8:30 AM CST - CBOT commodity pause ends
+        "description": "No orders accepted for CBOT commodities during this window",
+        # NOTE: Not yet implemented in TradingCalendar - future enhancement
+    },
+    "description": "TopStepX platform rules - verified 2025-11-24 from official documentation",
 }
 
 
