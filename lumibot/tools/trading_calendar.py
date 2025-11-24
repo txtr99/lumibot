@@ -21,11 +21,15 @@ Integration:
     self.calendar.log_status(status, self.log_message)
 """
 
+import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Callable, Dict, List, Optional
 
 import pytz
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -352,12 +356,35 @@ class TradingCalendar:
 
         current_time_str = current_dt.strftime("%H:%M")
 
+        # Check for stop_new_orders bypass (TESTING ONLY)
+        # This allows trades up until force_flat time, bypassing the 30-min buffer
+        bypass_enabled = os.environ.get("ALLOW_TRADES_UNTIL_FORCE_FLAT", "").lower() == "true"
+
         # Platform-level restriction
-        if (
-            current_time_str >= self.platform_config["daily_stop_new_orders"]
-            and current_time_str < self.platform_config["daily_resume"]
-        ):
-            return False, "No new orders (platform)"
+        if bypass_enabled:
+            # Bypass: use force_flat instead of stop_new_orders
+            if (
+                current_time_str >= self.platform_config["daily_force_flat"]
+                and current_time_str < self.platform_config["daily_resume"]
+            ):
+                return False, "Platform closed"
+
+            # Log warning when bypass is actually triggered (between stop_new_orders and force_flat)
+            if (
+                current_time_str >= self.platform_config["daily_stop_new_orders"]
+                and current_time_str < self.platform_config["daily_force_flat"]
+            ):
+                _logger.warning(
+                    f"ALLOW_TRADES_UNTIL_FORCE_FLAT active at {current_time_str} - "
+                    f"normally blocked from {self.platform_config['daily_stop_new_orders']}"
+                )
+        else:
+            # Normal behavior: block after daily_stop_new_orders
+            if (
+                current_time_str >= self.platform_config["daily_stop_new_orders"]
+                and current_time_str < self.platform_config["daily_resume"]
+            ):
+                return False, "No new orders (platform)"
 
         # Session-level check
         for session_name in allowed_sessions:
@@ -366,15 +393,22 @@ class TradingCalendar:
 
             session = self.sessions[session_name]
             start = session["start"]
-            stop_orders = session["stop_new_orders"]
+
+            # Use force_flat as cutoff if bypass enabled, otherwise use stop_new_orders
+            cutoff = session["force_flat"] if bypass_enabled else session["stop_new_orders"]
 
             # Handle midnight crossover
-            if start > stop_orders:
-                if current_time_str >= start or current_time_str < stop_orders:
-                    return True, f"{session_name} open"
+            if start > cutoff:
+                # Session crosses midnight (e.g., 17:00 - 01:30)
+                if current_time_str >= start or current_time_str < cutoff:
+                    reason = f"{session_name} open (bypass)" if bypass_enabled else f"{session_name} open"
+                    return True, reason
             else:
-                if current_time_str < stop_orders:
-                    return True, f"{session_name} open"
+                # Normal session (e.g., 07:30 - 13:45)
+                # Must be >= start AND < cutoff
+                if start <= current_time_str < cutoff:
+                    reason = f"{session_name} open (bypass)" if bypass_enabled else f"{session_name} open"
+                    return True, reason
 
         return False, "No active session"
 
