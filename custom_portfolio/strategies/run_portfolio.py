@@ -288,32 +288,10 @@ def _cme_holiday_calendar():
     return _CMEHolidayCalendar()
 
 
-def _compute_expected_minutes_totals(
-    start_dt, end_dt, eth_minutes_per_day: int = 1335, rth_minutes_per_day: int = 390
-):
-    """
-    Compute expected ETH/RTH minute totals between start and end (inclusive).
-
-    - Skips weekends (Sat/Sun).
-    - Skips CME holidays (approximate list).
-    - ETH baseline ~22.25h/day (1335 minutes) and RTH baseline ~6.5h/day (390 minutes).
-    """
-    start_ts = pd.Timestamp(start_dt)
-    end_ts = pd.Timestamp(end_dt)
-    days = pd.date_range(start_ts.normalize(), end_ts.normalize(), freq="D")
-    cal = _cme_holiday_calendar()
-    holidays = set(pd.to_datetime(cal.holidays(start=days.min(), end=days.max())).date)
-
-    eth_total = 0
-    rth_total = 0
-    for day in days:
-        day_date = day.date()
-        if day.weekday() >= 5:  # Saturday/Sunday
-            continue
-        if day_date in holidays:
-            continue
-        eth_total += eth_minutes_per_day
-        rth_total += rth_minutes_per_day
+def _compute_expected_minutes_totals(expected_per_day: dict):
+    """Sum expected minutes across all days from the per-day map."""
+    eth_total = sum(v[0] for v in expected_per_day.values())
+    rth_total = sum(v[1] for v in expected_per_day.values())
     return eth_total, rth_total
 
 
@@ -323,6 +301,11 @@ def _expected_minutes_by_day(
     """
     Expected minutes per day (ETH/RTH) with weekend/holiday skips, maintenance deduction,
     and clipping to the backtest window (handles partial first/last day).
+
+    Rules:
+    - Sunday: only count trading after maintenance window ends (no pre-maintenance Sunday trading).
+    - Monday-Thursday: full ETH minus maintenance overlap.
+    - Friday: only count trading up to maintenance start (does not reopen after).
     """
     start_ts = pd.Timestamp(start_dt)
     end_ts = pd.Timestamp(end_dt)
@@ -353,10 +336,27 @@ def _expected_minutes_by_day(
             expected[day_date] = (0, 0)
             continue
 
-        total_minutes = int((clip_end - clip_start).total_seconds() // 60)
-        maint_start_dt = pd.Timestamp(datetime.combine(day_date, maint_start))
-        maint_end_dt = pd.Timestamp(datetime.combine(day_date, maint_end))
-        maint_minutes = _overlap_minutes(clip_start, clip_end, maint_start_dt, maint_end_dt)
+        weekday = day.weekday()
+        # Sunday (6): trade only after maintenance ends
+        if weekday == 6:
+            session_start = pd.Timestamp(datetime.combine(day_date, maint_end))
+            clip_start = max(clip_start, session_start)
+            total_minutes = int(max(0, (clip_end - clip_start).total_seconds() // 60))
+            maint_minutes = 0  # already enforced by start time
+        # Friday (4): trade only until maintenance starts
+        elif weekday == 4:
+            session_end = pd.Timestamp(datetime.combine(day_date, maint_start))
+            clip_end = min(clip_end, session_end)
+            if clip_end <= clip_start:
+                expected[day_date] = (0, 0)
+                continue
+            total_minutes = int((clip_end - clip_start).total_seconds() // 60)
+            maint_minutes = 0  # we cut off before maintenance
+        else:
+            total_minutes = int((clip_end - clip_start).total_seconds() // 60)
+            maint_start_dt = pd.Timestamp(datetime.combine(day_date, maint_start))
+            maint_end_dt = pd.Timestamp(datetime.combine(day_date, maint_end))
+            maint_minutes = _overlap_minutes(clip_start, clip_end, maint_start_dt, maint_end_dt)
 
         expected_eth = max(0, total_minutes - maint_minutes)
         expected_rth = max(0, min(rth_minutes_per_day, total_minutes) - maint_minutes)
@@ -419,7 +419,7 @@ def _run_backtest_data_qa(data_source, start_dt, end_dt, qa_tz: str = "UTC"):
         return
 
     expected_per_day = _expected_minutes_by_day(start_dt, end_dt)
-    total_days_expected_eth, total_days_expected_rth = _compute_expected_minutes_totals(start_dt, end_dt)
+    total_days_expected_eth, total_days_expected_rth = _compute_expected_minutes_totals(expected_per_day)
 
     print("[DATA-QA] Starting backtest data quality report")
     print(f"[DATA-QA] Window: {start_dt} -> {end_dt} | QA_TZ={qa_tz}")
