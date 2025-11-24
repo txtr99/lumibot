@@ -145,6 +145,7 @@ Date: 2025-11-19
 """
 
 import argparse
+import json
 import logging
 import os
 import signal
@@ -260,6 +261,11 @@ DAILY_MISSING_TOLERANCE_MINUTES = 10  # allow a small buffer before flagging a d
 def _maintenance_window_utc():
     """Return daily maintenance window in UTC (approximate CME Globex daily break)."""
     return dtime(hour=21, minute=0), dtime(hour=22, minute=0)  # 60-minute window
+
+
+def _qa_json_path():
+    """Return QA JSON output path (env override)."""
+    return Path(os.environ.get("QA_JSON_PATH", "logs/data_qa_report.json"))
 
 
 @lru_cache(maxsize=1)
@@ -424,6 +430,7 @@ def _run_backtest_data_qa(data_source, start_dt, end_dt, qa_tz: str = "UTC"):
 
     expected_per_day = _expected_minutes_by_day(start_dt, end_dt)
     total_days_expected_eth, total_days_expected_rth = _compute_expected_minutes_totals(expected_per_day)
+    qa_records = []
 
     print("[DATA-QA] Starting backtest data quality report")
     print(f"[DATA-QA] Window: {start_dt} -> {end_dt} | QA_TZ={qa_tz}")
@@ -519,8 +526,50 @@ def _run_backtest_data_qa(data_source, start_dt, end_dt, qa_tz: str = "UTC"):
                 print(f"[DATA-QA] {symbol}: days with <95% ETH coverage (excl. maintenance):")
                 for d, obs, exp, cov in flagged_days:
                     print(f"           {d}: observed={obs} expected={exp} coverage={cov:.1%}")
+            qa_records.append(
+                {
+                    "symbol": symbol,
+                    "rows": int(observed_minutes),
+                    "minutes": int(observed_minute_count),
+                    "coverage_eth_pct": coverage_eth,
+                    "coverage_rth_pct": coverage_rth,
+                    "first_ts": str(first_ts),
+                    "last_ts": str(last_ts),
+                    "missing_minutes": int(missing),
+                    "gap_samples": [
+                        {"start": str(start_gap), "end": str(end_gap), "minutes": int(gap_len)}
+                        for start_gap, end_gap, gap_len in gap_ranges
+                    ],
+                    "flagged_days": [
+                        {"date": str(d), "observed": int(obs), "expected": int(exp), "coverage": cov}
+                        for d, obs, exp, cov in flagged_days
+                    ],
+                }
+            )
         except Exception as e:
             print(f"[DATA-QA] {symbol if symbol else key}: QA error: {e}")
+            qa_records.append({"symbol": symbol if symbol else str(key), "error": str(e)})
+
+    # Export QA summary to JSON for downstream analysis
+    try:
+        qa_path = _qa_json_path()
+        qa_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "window": {"start": str(start_dt), "end": str(end_dt), "tz": qa_tz},
+            "baseline": {
+                "eth_per_day": 1335,
+                "rth_per_day": 390,
+                "eth_total": total_days_expected_eth,
+                "rth_total": total_days_expected_rth,
+                "daily_tolerance": DAILY_MISSING_TOLERANCE_MINUTES,
+            },
+            "records": qa_records,
+        }
+        with qa_path.open("w") as f:
+            json.dump(payload, f, indent=2)
+        print(f"[DATA-QA] JSON report saved to {qa_path}")
+    except Exception as e:
+        print(f"[DATA-QA] Failed to write JSON report: {e}")
 
 
 def _deep_debug_config():
