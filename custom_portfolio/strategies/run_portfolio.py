@@ -150,8 +150,11 @@ import os
 import signal
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, time as dtime
+from functools import lru_cache
 from pathlib import Path
+
+import numpy as np
 
 # Add repository root to path for custom_portfolio imports
 # Path: run_portfolio.py -> strategies/ -> custom_portfolio/ -> repo_root/
@@ -239,6 +242,280 @@ def _capital_config():
 def _debug_config():
     """Enable verbose portfolio debug logs (prefetch + iterations)."""
     return os.environ.get("PORTFOLIO_DEBUG", "true").lower() == "true"
+
+
+def _qa_disabled():
+    """Check if backtest data QA is disabled via environment toggle."""
+    return os.environ.get("DISABLE_BACKTEST_DATA_QA", "false").lower() in ("1", "true", "yes", "y", "on")
+
+
+def _qa_timezone():
+    """Timezone to display QA results in (default UTC)."""
+    return os.environ.get("QA_TZ", "UTC")
+
+
+def _maintenance_window_utc():
+    """Return daily maintenance window in UTC (approximate CME Globex daily break)."""
+    return dtime(hour=21, minute=0), dtime(hour=22, minute=0)  # 60-minute window
+
+
+@lru_cache(maxsize=1)
+def _cme_holiday_calendar():
+    """Return a pandas holiday calendar covering major CME US holidays (approximate)."""
+    from pandas.tseries.holiday import (
+        AbstractHolidayCalendar,
+        Holiday,
+        GoodFriday,
+        USLaborDay,
+        USMemorialDay,
+        USPresidentsDay,
+        USThanksgivingDay,
+        nearest_workday,
+    )
+
+    class _CMEHolidayCalendar(AbstractHolidayCalendar):
+        rules = [
+            Holiday("NewYearsDay", month=1, day=1, observance=nearest_workday),
+            USPresidentsDay,
+            USMemorialDay,
+            USLaborDay,
+            USThanksgivingDay,
+            GoodFriday,
+            Holiday("IndependenceDay", month=7, day=4, observance=nearest_workday),
+            Holiday("Christmas", month=12, day=25, observance=nearest_workday),
+        ]
+
+    return _CMEHolidayCalendar()
+
+
+def _compute_expected_minutes_totals(
+    start_dt, end_dt, eth_minutes_per_day: int = 1335, rth_minutes_per_day: int = 390
+):
+    """
+    Compute expected ETH/RTH minute totals between start and end (inclusive).
+
+    - Skips weekends (Sat/Sun).
+    - Skips CME holidays (approximate list).
+    - ETH baseline ~22.25h/day (1335 minutes) and RTH baseline ~6.5h/day (390 minutes).
+    """
+    start_ts = pd.Timestamp(start_dt)
+    end_ts = pd.Timestamp(end_dt)
+    days = pd.date_range(start_ts.normalize(), end_ts.normalize(), freq="D")
+    cal = _cme_holiday_calendar()
+    holidays = set(pd.to_datetime(cal.holidays(start=days.min(), end=days.max())).date)
+
+    eth_total = 0
+    rth_total = 0
+    for day in days:
+        day_date = day.date()
+        if day.weekday() >= 5:  # Saturday/Sunday
+            continue
+        if day_date in holidays:
+            continue
+        eth_total += eth_minutes_per_day
+        rth_total += rth_minutes_per_day
+    return eth_total, rth_total
+
+
+def _expected_minutes_by_day(
+    start_dt, end_dt, eth_minutes_per_day: int = 1335, rth_minutes_per_day: int = 390
+):
+    """
+    Expected minutes per day (ETH/RTH) with weekend/holiday skips, maintenance deduction,
+    and clipping to the backtest window (handles partial first/last day).
+    """
+    start_ts = pd.Timestamp(start_dt)
+    end_ts = pd.Timestamp(end_dt)
+    days = pd.date_range(start_ts.normalize(), end_ts.normalize(), freq="D")
+    cal = _cme_holiday_calendar()
+    holidays = set(pd.to_datetime(cal.holidays(start=days.min(), end=days.max())).date)
+    maint_start, maint_end = _maintenance_window_utc()
+
+    def _overlap_minutes(a_start, a_end, b_start, b_end):
+        start_o = max(a_start, b_start)
+        end_o = min(a_end, b_end)
+        if end_o <= start_o:
+            return 0
+        return int((end_o - start_o).total_seconds() // 60)
+
+    expected = {}
+    for day in days:
+        day_date = day.date()
+        if day.weekday() >= 5 or day_date in holidays:
+            expected[day_date] = (0, 0)
+            continue
+
+        day_start = pd.Timestamp(day_date)
+        day_end = day_start + pd.Timedelta(days=1)
+        clip_start = max(day_start, start_ts)
+        clip_end = min(day_end, end_ts)
+        if clip_end <= clip_start:
+            expected[day_date] = (0, 0)
+            continue
+
+        total_minutes = int((clip_end - clip_start).total_seconds() // 60)
+        maint_start_dt = pd.Timestamp(datetime.combine(day_date, maint_start))
+        maint_end_dt = pd.Timestamp(datetime.combine(day_date, maint_end))
+        maint_minutes = _overlap_minutes(clip_start, clip_end, maint_start_dt, maint_end_dt)
+
+        expected_eth = max(0, total_minutes - maint_minutes)
+        expected_rth = max(0, min(rth_minutes_per_day, total_minutes) - maint_minutes)
+        expected[day_date] = (expected_eth, expected_rth)
+    return expected
+
+
+def _gap_ranges_from_missing(missing_index, limit: int = 5):
+    """Return up to `limit` gap ranges from a missing DatetimeIndex."""
+    if len(missing_index) == 0:
+        return []
+    missing_sorted = missing_index.sort_values()
+    ranges = []
+    start = missing_sorted[0]
+    prev = start
+    for ts in missing_sorted[1:]:
+        if (ts - prev) > pd.Timedelta(minutes=1):
+            ranges.append((start, prev))
+            if len(ranges) >= limit:
+                break
+            start = ts
+        prev = ts
+    if len(ranges) < limit:
+        ranges.append((start, prev))
+    return ranges[:limit]
+
+
+def _window_df(df, start_dt, end_dt):
+    """Slice df between start_dt and end_dt, aligning timezones if needed."""
+    if df is None or df.empty:
+        return df
+    idx = df.index
+    start_ts = pd.Timestamp(start_dt)
+    end_ts = pd.Timestamp(end_dt)
+    if hasattr(idx, "tz") and idx.tz is not None:
+        if start_ts.tzinfo is None:
+            start_ts = start_ts.tz_localize(idx.tz)
+            end_ts = end_ts.tz_localize(idx.tz)
+        else:
+            start_ts = start_ts.tz_convert(idx.tz)
+            end_ts = end_ts.tz_convert(idx.tz)
+    elif start_ts.tzinfo is not None:
+        # If index is naive but start_dt is tz-aware, drop tz to compare
+        start_ts = start_ts.tz_localize(None)
+        end_ts = end_ts.tz_localize(None)
+    return df.loc[(idx >= start_ts) & (idx <= end_ts)]
+
+
+def _run_backtest_data_qa(data_source, start_dt, end_dt, qa_tz: str = "UTC"):
+    """
+    Emit a data quality report for prefetched data (backtest only).
+
+    - Read-only: uses existing pandas_data; no API calls, no cache mutation.
+    - Reports per-symbol coverage vs ETH (22.25h) and RTH (6.5h) baselines.
+    - Highlights top missing-minute gaps.
+    """
+    store = getattr(data_source, "pandas_data", None)
+    if not store or not isinstance(store, dict):
+        print("[DATA-QA] No pandas_data store available; skipping QA")
+        return
+
+    expected_per_day = _expected_minutes_by_day(start_dt, end_dt)
+    total_days_expected_eth, total_days_expected_rth = _compute_expected_minutes_totals(start_dt, end_dt)
+
+    print("[DATA-QA] Starting backtest data quality report")
+    print(f"[DATA-QA] Window: {start_dt} -> {end_dt} | QA_TZ={qa_tz}")
+    print(
+        f"[DATA-QA] Baseline minutes: ETH/day=1335, RTH/day=390 | "
+        f"ETH total={total_days_expected_eth}, RTH total={total_days_expected_rth}"
+    )
+
+    maint_start, maint_end = _maintenance_window_utc()
+
+    for key, data_obj in store.items():
+        symbol = None
+        try:
+            asset = key[0] if isinstance(key, tuple) else key
+            symbol = getattr(asset, "symbol", "UNKNOWN")
+            df = getattr(data_obj, "df", None)
+            if df is None or df.empty:
+                print(f"[DATA-QA] {symbol}: no data (empty)")
+                continue
+            windowed = _window_df(df, start_dt, end_dt)
+            if windowed is None or windowed.empty:
+                print(f"[DATA-QA] {symbol}: no data in window")
+                continue
+
+            idx = windowed.index.sort_values().unique()
+            if qa_tz and hasattr(idx, "tz") and idx.tz is not None:
+                windowed = windowed.copy()
+                windowed.index = windowed.index.tz_convert(qa_tz)
+                idx = windowed.index.sort_values().unique()
+
+            observed_minutes = len(idx)
+            first_ts = idx[0]
+            last_ts = idx[-1]
+
+            observed_minute_count = len(idx)
+            expected_eth = total_days_expected_eth
+            expected_rth = total_days_expected_rth
+            coverage_eth = (observed_minute_count / expected_eth * 100) if expected_eth else 0.0
+            coverage_rth = (observed_minute_count / expected_rth * 100) if expected_rth else 0.0
+
+            # Filter out maintenance window for gap analysis and per-day counts
+            times = idx.time
+            mask = (times < maint_start) | (times >= maint_end)
+            idx_no_maint = idx[mask]
+
+            # Per-day coverage (exclude maintenance window)
+            # Per-day coverage (exclude maintenance window). Use pandas value_counts then map keys to date for lookup.
+            per_day_counts = idx_no_maint.normalize().value_counts().to_dict()
+            per_day_counts = {ts.date(): count for ts, count in per_day_counts.items()}
+
+            # Gap detection (numpy delta; tiny loop only for samples); ignore days with expected=0
+            missing_count = 0
+            gap_ranges = []
+            if len(idx_no_maint) >= 2:
+                arr = idx_no_maint
+                delta_min = (arr[1:].asi8 - arr[:-1].asi8) // 60_000_000_000  # ns -> minutes
+                day_arr = np.array([ts.date() for ts in arr])
+                same_day = day_arr[1:] == day_arr[:-1]
+                exp_arr = np.fromiter((expected_per_day.get(d, (0, 0))[0] for d in day_arr[1:]), dtype=int, count=len(day_arr) - 1)
+                gap_mask = (delta_min > 1) & same_day & (exp_arr > 0)
+                if gap_mask.any():
+                    missing_count = int(np.sum(delta_min[gap_mask] - 1))
+                    gap_idx = np.nonzero(gap_mask)[0][:3]
+                    for i in gap_idx:
+                        start_ts = arr[i] + pd.Timedelta(minutes=1)
+                        end_ts = arr[i + 1] - pd.Timedelta(minutes=1)
+                        gap_len = int(delta_min[i] - 1)
+                        gap_ranges.append((start_ts, end_ts, gap_len))
+            missing = missing_count
+
+            flagged_days = []
+            for d, (exp_eth_day, _) in expected_per_day.items():
+                observed_day = per_day_counts.get(d, 0)
+                if exp_eth_day == 0:
+                    continue
+                cov = observed_day / exp_eth_day
+                if cov < 0.95:
+                    flagged_days.append((d, observed_day, exp_eth_day, cov))
+
+            print(
+                f"[DATA-QA] {symbol}: rows={observed_minutes} minutes={observed_minute_count} "
+                f"coverage_eth={coverage_eth:.1f}% coverage_rth={coverage_rth:.1f}% "
+                f"first={first_ts} last={last_ts}"
+            )
+            if missing == 0:
+                print(f"[DATA-QA] {symbol}: no missing minutes detected in window (excl. maintenance)")
+            else:
+                print(f"[DATA-QA] {symbol}: missing_minutes={missing} (excl. maintenance); sample gaps:")
+                for start_gap, end_gap, gap_len in gap_ranges:
+                    print(f"           gap {start_gap} -> {end_gap} ({gap_len} mins)")
+            if flagged_days:
+                print(f"[DATA-QA] {symbol}: days with <95% ETH coverage (excl. maintenance):")
+                for d, obs, exp, cov in flagged_days:
+                    print(f"           {d}: observed={obs} expected={exp} coverage={cov:.1%}")
+        except Exception as e:
+            print(f"[DATA-QA] {symbol if symbol else key}: QA error: {e}")
 
 
 def _deep_debug_config():
@@ -808,6 +1085,14 @@ def run_backtest(args):
                     elapsed = time.perf_counter() - start_prefetch
                     print(TF.success(f"Data prefetch complete in {elapsed:.2f}s for {len(symbols)} symbols"))
                 # TODO: allow timestep override beyond 'minute' if multi-timeframe support is added later
+
+                # Backtest-only data QA (read-only)
+                if not _qa_disabled():
+                    qa_tz = _qa_timezone()
+                    try:
+                        _run_backtest_data_qa(self.portfolio_data_source, backtesting_start, backtesting_end, qa_tz)
+                    except Exception as e:
+                        print(f"[DATA-QA] QA check failed: {e}")
 
             self.sleeptime = "1M"  # 1-minute bars
 
