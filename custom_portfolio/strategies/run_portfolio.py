@@ -306,6 +306,7 @@ def _expected_minutes_by_day(
     - Sunday: only count trading after maintenance window ends (no pre-maintenance Sunday trading).
     - Monday-Thursday: full ETH minus maintenance overlap.
     - Friday: only count trading up to maintenance start (does not reopen after).
+    These match CME Globex behavior for futures (data source is CME via Databento).
     """
     start_ts = pd.Timestamp(start_dt)
     end_ts = pd.Timestamp(end_dt)
