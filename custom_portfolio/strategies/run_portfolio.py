@@ -493,8 +493,8 @@ def _run_backtest_data_qa(data_source, start_dt, end_dt, qa_tz: str = "UTC"):
                 gap_mask = (delta_min > 1) & same_day & (exp_arr > 0)
                 if gap_mask.any():
                     missing_count = int(np.sum(delta_min[gap_mask] - 1))
-                    gap_idx = np.nonzero(gap_mask)[0][:3]
-                    for i in gap_idx:
+                    gap_indices = np.nonzero(gap_mask)[0]
+                    for i in gap_indices:
                         start_ts = arr[i] + pd.Timedelta(minutes=1)
                         end_ts = arr[i + 1] - pd.Timedelta(minutes=1)
                         gap_len = int(delta_min[i] - 1)
@@ -536,7 +536,7 @@ def _run_backtest_data_qa(data_source, start_dt, end_dt, qa_tz: str = "UTC"):
                     "first_ts": str(first_ts),
                     "last_ts": str(last_ts),
                     "missing_minutes": int(missing),
-                    "gap_samples": [
+                    "gaps": [
                         {"start": str(start_gap), "end": str(end_gap), "minutes": int(gap_len)}
                         for start_gap, end_gap, gap_len in gap_ranges
                     ],
