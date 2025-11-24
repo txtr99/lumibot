@@ -254,6 +254,9 @@ def _qa_timezone():
     return os.environ.get("QA_TZ", "UTC")
 
 
+DAILY_MISSING_TOLERANCE_MINUTES = 10  # allow a small buffer before flagging a day
+
+
 def _maintenance_window_utc():
     """Return daily maintenance window in UTC (approximate CME Globex daily break)."""
     return dtime(hour=21, minute=0), dtime(hour=22, minute=0)  # 60-minute window
@@ -497,7 +500,8 @@ def _run_backtest_data_qa(data_source, start_dt, end_dt, qa_tz: str = "UTC"):
                 if exp_eth_day == 0:
                     continue
                 cov = observed_day / exp_eth_day
-                if cov < 0.95:
+                # Allow a small tolerance before flagging
+                if observed_day + DAILY_MISSING_TOLERANCE_MINUTES < exp_eth_day:
                     flagged_days.append((d, observed_day, exp_eth_day, cov))
 
             print(
