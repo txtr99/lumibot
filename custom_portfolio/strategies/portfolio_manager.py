@@ -53,6 +53,91 @@ SESSION_ABBREVIATIONS = {
 }
 
 
+# ================================================================================
+# TRADING SESSIONS CONFIGURATION
+# ================================================================================
+# All times in Central Time (America/Chicago) - the SOURCE OF TRUTH
+# DST handling: pytz automatically adjusts for Daylight Saving Time
+# TopStepX compliance: These times match TopStepX platform requirements
+#
+# CRITICAL: Annual review required to verify TopStepX rules haven't changed
+# Reference: https://help.topstep.com/en/articles/8284206
+# ================================================================================
+
+TRADING_SESSIONS = {
+    "24/7": {
+        "name": "24/7",
+        "start_time": "00:00",  # Midnight CT
+        "end_time": "23:59",  # 11:59 PM CT
+        "description": "24/7 trading (no restrictions)",
+        "force_flat_time": None,  # No forced exit
+        "stop_new_orders_time": None,  # No order restriction
+    },
+    "Australia": {
+        "name": "Australia",
+        "start_time": "17:00",  # 5:00 PM CT
+        "end_time": "02:00",  # 2:00 AM CT (next day) - crosses midnight
+        "description": "Australia/New Zealand session (overnight CT)",
+        "force_flat_time": "01:45",  # Force flat 15 min before close
+        "stop_new_orders_time": "01:30",  # Stop new orders 30 min before close
+    },
+    "Asia": {
+        "name": "Asia",
+        "start_time": "18:00",  # 6:00 PM CT
+        "end_time": "03:00",  # 3:00 AM CT (next day) - crosses midnight
+        "description": "Asian session (Hong Kong/Singapore)",
+        "force_flat_time": "02:45",  # Force flat 15 min before close
+        "stop_new_orders_time": "02:30",  # Stop new orders 30 min before close
+    },
+    "London": {
+        "name": "London",
+        "start_time": "02:00",  # 2:00 AM CT
+        "end_time": "11:00",  # 11:00 AM CT
+        "description": "London session (European markets)",
+        "force_flat_time": "10:45",  # Force flat 15 min before close
+        "stop_new_orders_time": "10:30",  # Stop new orders 30 min before close
+    },
+    "New_York": {
+        "name": "New_York",
+        "start_time": "07:30",  # 7:30 AM CT (CME RTH open)
+        "end_time": "14:00",  # 2:00 PM CT (CME RTH close)
+        "description": "New York session (CME regular trading hours)",
+        "force_flat_time": "13:50",  # Force flat 10 min before close
+        "stop_new_orders_time": "13:45",  # Stop new orders 15 min before close
+    },
+}
+
+
+# ================================================================================
+# TOPSTEPX PLATFORM CONFIGURATION
+# ================================================================================
+# Platform-level restrictions that override session-level rules
+# All times in Central Time (America/Chicago)
+#
+# CRITICAL: These times must EXACTLY match TopStepX platform rules
+# Violating these rules can result in account violations or termination
+# Reference: https://help.topstep.com/en/articles/8284206
+#
+# Platform maintenance: Daily 2:00 PM - 4:00 PM CT (14:00-16:00)
+# Weekend blackout: Friday 2:00 PM CT - Sunday 4:00 PM CT
+# ================================================================================
+
+TOPSTEPX_PLATFORM_CONFIG = {
+    "daily_stop_new_orders": "14:00",  # 2:00 PM CT - start of daily maintenance
+    "daily_force_flat": "14:00",  # 2:00 PM CT - must be flat during maintenance
+    "daily_resume": "16:00",  # 4:00 PM CT - maintenance ends, trading resumes
+    "weekend_close": {
+        "day": 4,  # Friday (0=Monday, 4=Friday)
+        "time": "14:00",  # 2:00 PM CT Friday
+    },
+    "weekend_open": {
+        "day": 6,  # Sunday (0=Monday, 6=Sunday)
+        "time": "16:00",  # 4:00 PM CT Sunday
+    },
+    "description": "TopStepX platform rules - NEVER violate these in live trading",
+}
+
+
 class StrategyLoader:
     """Handles loading and validation of individual strategy modules."""
 

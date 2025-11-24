@@ -526,18 +526,94 @@ def create_data_source_for_live():
         return None
 
 
-def create_calendar():
+def create_calendar(is_live: bool = False):
     """
-    Create a trading calendar instance.
+    Create trading calendar with Central Time as source of truth.
 
-    For futures, you might want to use a custom calendar.
+    All session times defined in CT (America/Chicago) internally.
+    User-facing display will convert to MT (America/Denver).
+
+    CRITICAL: In live mode, calendar creation failure causes HARD FAIL.
+    Never trade without calendar - violates TopStepX compliance rules.
+
+    Args:
+        is_live: True if running in live trading mode, False for backtest/validation
+
+    Returns:
+        TradingCalendar instance configured for TopStepX, or None if creation fails
+
+    Raises:
+        SystemExit: In live mode, if calendar creation fails (safety requirement)
     """
-    # Example: Create futures calendar
-    # from lumibot.tools import FuturesCalendar
-    # return FuturesCalendar()
+    import os
+    import traceback
 
-    # For now, return None (will use default)
-    return None
+    from custom_portfolio.strategies.portfolio_manager import (
+        TOPSTEPX_PLATFORM_CONFIG,
+        TRADING_SESSIONS,
+    )
+    from custom_portfolio.tools.terminal_formatter import TerminalFormatter as TF
+    from custom_portfolio.tools.timezone_utils import CENTRAL_TZ
+    from lumibot.tools.trading_calendar import TradingCalendar
+
+    # Check for emergency override (NEVER use in production)
+    emergency_disable = os.getenv("CALENDAR_EMERGENCY_DISABLE", "false").lower() == "true"
+
+    if emergency_disable:
+        warning_msg = TF.warning(
+            "⚠️  CALENDAR EMERGENCY OVERRIDE ACTIVE ⚠️\n"
+            "Calendar system disabled via CALENDAR_EMERGENCY_DISABLE env var.\n"
+            "This should NEVER be used in live trading - TopStepX rule violations may occur!"
+        )
+        print(warning_msg)
+        return None
+
+    try:
+        # Create calendar with Central Time (source of truth)
+        calendar = TradingCalendar(timezone=CENTRAL_TZ, platform_config=TOPSTEPX_PLATFORM_CONFIG)
+
+        # Register all trading sessions
+        calendar.register_sessions(TRADING_SESSIONS)
+
+        print(
+            TF.success(
+                f"Trading calendar created successfully with {len(TRADING_SESSIONS)} sessions:\n"
+                f"  Sessions: {', '.join(TRADING_SESSIONS.keys())}\n"
+                f"  Timezone: Central Time (America/Chicago)\n"
+                f"  Platform: TopStepX compliance enabled"
+            )
+        )
+
+        return calendar
+
+    except Exception as e:
+        error_msg = f"Failed to create trading calendar: {e}\n{traceback.format_exc()}"
+
+        if is_live:
+            # LIVE MODE: Hard fail - never trade without calendar
+            print(
+                TF.error(
+                    "❌ CRITICAL ERROR: Calendar creation failed in LIVE MODE\n\n"
+                    f"{error_msg}\n\n"
+                    "ABORTING: Cannot start live trading without calendar system.\n"
+                    "TopStepX compliance requires session enforcement.\n\n"
+                    "Emergency override (NOT RECOMMENDED): Set CALENDAR_EMERGENCY_DISABLE=true"
+                )
+            )
+            import sys
+
+            sys.exit(1)  # Hard fail - abort startup
+
+        else:
+            # BACKTEST/VALIDATION MODE: Warn and continue with None
+            print(
+                TF.warning(
+                    f"⚠️  Calendar creation failed in backtest/validation mode:\n{error_msg}\n\n"
+                    "Continuing without calendar (sessions not enforced).\n"
+                    "This is acceptable for backtesting but would fail in live mode."
+                )
+            )
+            return None
 
 
 def run_backtest(args):
@@ -610,10 +686,62 @@ def run_backtest(args):
             self.debug_logs_enabled = debug_logs
             self._iteration_counter = 0
 
+            # ========================================================================
+            # TRADING CALENDAR SETUP (Phase 4: Wire into Backtest)
+            # ========================================================================
+            # Create trading calendar for session enforcement
+            import os
+
+            from custom_portfolio.tools.terminal_formatter import TerminalFormatter as TF
+
+            # Create calendar (will return None if creation fails in backtest mode)
+            calendar = create_calendar(is_live=False)
+
+            # Read enforcement flag from environment
+            # Default: ENFORCE_SESSIONS_IN_BACKTEST=true (realistic backtest mode)
+            # Override: ENFORCE_SESSIONS_IN_BACKTEST=false (signal exploration mode)
+            enforce_sessions_str = os.getenv("ENFORCE_SESSIONS_IN_BACKTEST", "true").lower()
+            enforce_sessions = enforce_sessions_str in ["true", "1", "yes", "on"]
+
+            # Calculate ignore_calendar flag (inverse logic)
+            # ignore_calendar=True means "ignore the calendar" (no enforcement)
+            # ignore_calendar=False means "enforce the calendar" (realistic mode)
+            ignore_calendar = not enforce_sessions
+
+            if calendar is not None:
+                if enforce_sessions:
+                    print(
+                        TF.success(
+                            "✓ Session enforcement ENABLED for backtest\n"
+                            "  Trading restricted to strategy-defined sessions\n"
+                            "  Platform maintenance windows enforced (14:00-16:00 CT)\n"
+                            "  Weekend blackouts enforced (Fri 14:00 - Sun 16:00 CT)\n"
+                            "  Set ENFORCE_SESSIONS_IN_BACKTEST=false to disable"
+                        )
+                    )
+                else:
+                    print(
+                        TF.warning(
+                            "⚠️  Session enforcement DISABLED for backtest\n"
+                            "  All signals will be processed regardless of session times\n"
+                            "  Useful for signal exploration but unrealistic for live trading\n"
+                            "  Set ENFORCE_SESSIONS_IN_BACKTEST=true for realistic results"
+                        )
+                    )
+            else:
+                print(
+                    TF.warning(
+                        "⚠️  Calendar creation failed - sessions not enforced\n" "  This would fail in live trading mode"
+                    )
+                )
+                ignore_calendar = True  # Force disable if calendar is None
+
+            # ========================================================================
+
             self.portfolio_manager = PortfolioManager(
                 strategies_folder="custom_portfolio/strategies/active_strategies",
                 broker=self.broker,
-                calendar=self.trading_calendar if hasattr(self, "trading_calendar") else None,
+                calendar=calendar,
                 data_source=self.portfolio_data_source,
                 auto_load=True,
                 cache_ttl_seconds=3600,  # 1 hour for backtesting (prevents cache expiry during slow backtests)
@@ -627,7 +755,7 @@ def run_backtest(args):
                 shared_initial_capital=shared_initial_capital,
                 broker_strategy_name=getattr(self, "name", "PortfolioStrategy"),
                 deep_portfolio_debug=deep_portfolio_debug,
-                ignore_calendar=True,  # For backtests, always process signals regardless of session gating
+                ignore_calendar=ignore_calendar,  # Controlled by ENFORCE_SESSIONS_IN_BACKTEST env var
             )
 
             # Print validation report
@@ -939,8 +1067,48 @@ def run_live(args):
         print("❌ Data source not available from broker.")
         return
 
-    # Create calendar
-    calendar = create_calendar()
+    # ========================================================================
+    # TRADING CALENDAR SETUP (Phase 5: Wire into Live)
+    # ========================================================================
+    # CRITICAL: Create calendar with HARD FAIL enabled for live trading
+    # Calendar creation failure will abort startup (TopStepX compliance)
+    import sys
+
+    from custom_portfolio.tools.terminal_formatter import TerminalFormatter as TF
+
+    print("")
+    print(TF.section_header("Trading Calendar Initialization"))
+    print("")
+
+    # Create calendar with is_live=True (hard fail on errors)
+    calendar = create_calendar(is_live=True)
+
+    # Verify calendar was created successfully
+    if calendar is None:
+        # This should never happen in live mode (create_calendar should sys.exit(1))
+        # But add additional safety check just in case
+        print(
+            TF.error(
+                "❌ CRITICAL ERROR: Calendar is None in LIVE MODE\n\n"
+                "This is a safety violation - cannot proceed with live trading.\n"
+                "Calendar system is required for TopStepX compliance.\n\n"
+                "ABORTING live trading startup."
+            )
+        )
+        sys.exit(1)
+
+    # Confirm session enforcement (always enabled in live mode)
+    print(
+        TF.success(
+            "✓ Session enforcement ENABLED for live trading\n"
+            "  Trading restricted to strategy-defined sessions\n"
+            "  Platform maintenance windows enforced (14:00-16:00 CT)\n"
+            "  Weekend blackouts enforced (Fri 14:00 - Sun 16:00 CT)\n"
+            "  TopStepX compliance rules active"
+        )
+    )
+    print("")
+    # ========================================================================
 
     # Create portfolio manager
     portfolio_manager = PortfolioManager(
@@ -958,6 +1126,7 @@ def run_live(args):
         simulate_fills=simulate_fills,
         shared_initial_capital=shared_initial_capital,
         deep_portfolio_debug=deep_portfolio_debug,
+        ignore_calendar=False,  # ALWAYS enforce calendar in live mode (TopStepX compliance)
     )
 
     # Print validation report
