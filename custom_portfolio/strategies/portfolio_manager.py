@@ -53,6 +53,97 @@ SESSION_ABBREVIATIONS = {
 }
 
 
+# ================================================================================
+# TRADING SESSIONS CONFIGURATION
+# ================================================================================
+# All times in Central Time (America/Chicago) - the SOURCE OF TRUTH
+# DST handling: pytz automatically adjusts for Daylight Saving Time
+# TopStepX compliance: These times match TopStepX platform requirements
+#
+# CRITICAL: Annual review required to verify TopStepX rules haven't changed
+# Reference: https://help.topstep.com/en/articles/8284206
+# ================================================================================
+
+TRADING_SESSIONS = {
+    "24/7": {
+        "name": "24/7",
+        "start": "00:00",  # Midnight CT
+        "description": "24/7 trading (no restrictions)",
+        "force_flat": "23:59",  # End of day
+        "stop_new_orders": "23:59",  # No real restriction
+    },
+    "Australia": {
+        "name": "Australia",
+        "start": "17:00",  # 5:00 PM CT
+        "description": "Australia/New Zealand session (overnight CT, closes 2:00 AM CT)",
+        "force_flat": "01:45",  # Force flat at 1:45 AM CT (15 min before 2:00 AM close)
+        "stop_new_orders": "01:30",  # Stop new orders at 1:30 AM CT (30 min before close)
+    },
+    "Asia": {
+        "name": "Asia",
+        "start": "18:00",  # 6:00 PM CT
+        "description": "Asian session (Hong Kong/Singapore, closes 3:00 AM CT)",
+        "force_flat": "02:45",  # Force flat at 2:45 AM CT (15 min before 3:00 AM close)
+        "stop_new_orders": "02:30",  # Stop new orders at 2:30 AM CT (30 min before close)
+    },
+    "London": {
+        "name": "London",
+        "start": "02:00",  # 2:00 AM CT
+        "description": "London session (European markets, closes 11:00 AM CT)",
+        "force_flat": "10:45",  # Force flat at 10:45 AM CT (15 min before 11:00 AM close)
+        "stop_new_orders": "10:30",  # Stop new orders at 10:30 AM CT (30 min before close)
+    },
+    "New_York": {
+        "name": "New_York",
+        "start": "07:30",  # 7:30 AM CT (CME RTH open)
+        "description": "New York session (CME regular trading hours, closes 2:00 PM CT)",
+        "force_flat": "13:50",  # Force flat at 1:50 PM CT (10 min before 2:00 PM close)
+        "stop_new_orders": "13:45",  # Stop new orders at 1:45 PM CT (15 min before close)
+    },
+}
+
+
+# ================================================================================
+# TOPSTEPX PLATFORM CONFIGURATION
+# ================================================================================
+# Platform-level restrictions that override session-level rules
+# All times in Central Time (America/Chicago)
+#
+# CRITICAL: These times must EXACTLY match TopStepX platform rules
+# Violating these rules can result in account violations or termination
+# Reference: https://help.topstep.com/en/articles/8284206
+# Verified: 2025-11-24
+#
+# Daily position closure: Must be flat by 3:10 PM CT (Monday-Friday)
+# Risk managers start flattening: 3:08 PM CT as courtesy
+# Trading resumes: 5:00 PM CT same day, Sunday 5:00 PM CT for new week
+# CBOT Commodity pause: 7:45-8:30 AM CST (no orders during this window)
+#
+# CRITICAL: Annual review required to verify TopStepX rules haven't changed
+# ================================================================================
+
+TOPSTEPX_PLATFORM_CONFIG = {
+    "daily_stop_new_orders": "15:08",  # 3:08 PM CT - risk managers start flattening
+    "daily_force_flat": "15:10",  # 3:10 PM CT - HARD DEADLINE for position closure
+    "daily_resume": "17:00",  # 5:00 PM CT - trading resumes same day
+    "weekend_close": {
+        "day": 4,  # Friday (0=Monday, 4=Friday)
+        "time": "15:10",  # 3:10 PM CT Friday - must be flat by this time
+    },
+    "weekend_open": {
+        "day": 6,  # Sunday (0=Monday, 6=Sunday)
+        "time": "17:00",  # 5:00 PM CT Sunday - trading resumes for new week
+    },
+    "cbot_commodity_pause": {
+        "start": "07:45",  # 7:45 AM CST - CBOT commodity pause starts
+        "end": "08:30",  # 8:30 AM CST - CBOT commodity pause ends
+        "description": "No orders accepted for CBOT commodities during this window",
+        # NOTE: Not yet implemented in TradingCalendar - future enhancement
+    },
+    "description": "TopStepX platform rules - verified 2025-11-24 from official documentation",
+}
+
+
 class StrategyLoader:
     """Handles loading and validation of individual strategy modules."""
 
