@@ -67,43 +67,38 @@ SESSION_ABBREVIATIONS = {
 TRADING_SESSIONS = {
     "24/7": {
         "name": "24/7",
-        "start_time": "00:00",  # Midnight CT
-        "end_time": "23:59",  # 11:59 PM CT
+        "start": "00:00",  # Midnight CT
         "description": "24/7 trading (no restrictions)",
-        "force_flat_time": None,  # No forced exit
-        "stop_new_orders_time": None,  # No order restriction
+        "force_flat": "23:59",  # End of day
+        "stop_new_orders": "23:59",  # No real restriction
     },
     "Australia": {
         "name": "Australia",
-        "start_time": "17:00",  # 5:00 PM CT
-        "end_time": "02:00",  # 2:00 AM CT (next day) - crosses midnight
-        "description": "Australia/New Zealand session (overnight CT)",
-        "force_flat_time": "01:45",  # Force flat 15 min before close
-        "stop_new_orders_time": "01:30",  # Stop new orders 30 min before close
+        "start": "17:00",  # 5:00 PM CT
+        "description": "Australia/New Zealand session (overnight CT, closes 2:00 AM CT)",
+        "force_flat": "01:45",  # Force flat at 1:45 AM CT (15 min before 2:00 AM close)
+        "stop_new_orders": "01:30",  # Stop new orders at 1:30 AM CT (30 min before close)
     },
     "Asia": {
         "name": "Asia",
-        "start_time": "18:00",  # 6:00 PM CT
-        "end_time": "03:00",  # 3:00 AM CT (next day) - crosses midnight
-        "description": "Asian session (Hong Kong/Singapore)",
-        "force_flat_time": "02:45",  # Force flat 15 min before close
-        "stop_new_orders_time": "02:30",  # Stop new orders 30 min before close
+        "start": "18:00",  # 6:00 PM CT
+        "description": "Asian session (Hong Kong/Singapore, closes 3:00 AM CT)",
+        "force_flat": "02:45",  # Force flat at 2:45 AM CT (15 min before 3:00 AM close)
+        "stop_new_orders": "02:30",  # Stop new orders at 2:30 AM CT (30 min before close)
     },
     "London": {
         "name": "London",
-        "start_time": "02:00",  # 2:00 AM CT
-        "end_time": "11:00",  # 11:00 AM CT
-        "description": "London session (European markets)",
-        "force_flat_time": "10:45",  # Force flat 15 min before close
-        "stop_new_orders_time": "10:30",  # Stop new orders 30 min before close
+        "start": "02:00",  # 2:00 AM CT
+        "description": "London session (European markets, closes 11:00 AM CT)",
+        "force_flat": "10:45",  # Force flat at 10:45 AM CT (15 min before 11:00 AM close)
+        "stop_new_orders": "10:30",  # Stop new orders at 10:30 AM CT (30 min before close)
     },
     "New_York": {
         "name": "New_York",
-        "start_time": "07:30",  # 7:30 AM CT (CME RTH open)
-        "end_time": "14:00",  # 2:00 PM CT (CME RTH close)
-        "description": "New York session (CME regular trading hours)",
-        "force_flat_time": "13:50",  # Force flat 10 min before close
-        "stop_new_orders_time": "13:45",  # Stop new orders 15 min before close
+        "start": "07:30",  # 7:30 AM CT (CME RTH open)
+        "description": "New York session (CME regular trading hours, closes 2:00 PM CT)",
+        "force_flat": "13:50",  # Force flat at 1:50 PM CT (10 min before 2:00 PM close)
+        "stop_new_orders": "13:45",  # Stop new orders at 1:45 PM CT (15 min before close)
     },
 }
 
