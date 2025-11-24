@@ -541,9 +541,7 @@ class PortfolioManager:
 
             # Warn once per strategy about missing signal function
             if not getattr(strategy_state, "_missing_signal_warned", False):
-                self.logger.warning(
-                    f"No generate_signal_func found for {strategy_state.strategy_id}; returning HOLD"
-                )
+                self.logger.warning(f"No generate_signal_func found for {strategy_state.strategy_id}; returning HOLD")
                 strategy_state._missing_signal_warned = True
             return "HOLD"
 
@@ -778,6 +776,25 @@ class PortfolioManager:
 
     def export_snapshots(self, folder: Path) -> Optional[Path]:
         """
+        Export per-bar snapshots and equity curve to CSV if enabled and available.
+
+        Args:
+            folder: Destination folder
+
+        Returns:
+            Path to snapshots CSV if written, else None
+        """
+        snapshots_path = self._save_snapshots(folder)
+        equity_curve_path = self._save_equity_curve(folder)
+
+        # Print equity curve path if written
+        if equity_curve_path:
+            print(f"Equity curve written to {equity_curve_path}")
+
+        return snapshots_path
+
+    def _save_snapshots(self, folder: Path) -> Optional[Path]:
+        """
         Export per-bar snapshots to CSV if enabled and available.
 
         Args:
@@ -794,6 +811,38 @@ class PortfolioManager:
         folder.mkdir(parents=True, exist_ok=True)
         out_path = folder / "snapshots.csv"
         # Write in chunks to reduce peak memory usage on very large snapshots
+        chunk_size = 50000
+        if len(df) <= chunk_size:
+            df.to_csv(out_path, index=False)
+        else:
+            with out_path.open("w") as f:
+                start = 0
+                end = chunk_size
+                df.iloc[start:end].to_csv(f, index=False, header=True)
+                while end < len(df):
+                    start = end
+                    end = min(len(df), start + chunk_size)
+                    df.iloc[start:end].to_csv(f, index=False, header=False)
+        return out_path
+
+    def _save_equity_curve(self, folder: Path) -> Optional[Path]:
+        """
+        Export equity curve (per-bar portfolio value) to CSV if enabled and available.
+
+        Args:
+            folder: Destination folder
+
+        Returns:
+            Path to CSV if written, else None
+        """
+        if self.executor is None or not getattr(self.executor, "enable_snapshots", False):
+            return None
+        df = self.executor.attribution.get_equity_curve_df()
+        if df.empty:
+            return None
+        folder.mkdir(parents=True, exist_ok=True)
+        out_path = folder / "equity_curve.csv"
+        # Write in chunks to reduce peak memory usage on very large equity curves
         chunk_size = 50000
         if len(df) <= chunk_size:
             df.to_csv(out_path, index=False)
@@ -852,5 +901,6 @@ class PortfolioManager:
     @staticmethod
     def _sanitize_strategy_id(stem: str) -> str:
         import re
+
         safe = re.sub(r"[^A-Za-z0-9_]+", "_", stem).strip("_")
         return safe or stem

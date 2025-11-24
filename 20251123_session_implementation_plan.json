@@ -1,0 +1,677 @@
+{
+  "plan_metadata": {
+    "created_date": "2025-01-23",
+    "plan_name": "Trading Sessions & Calendar Integration Implementation",
+    "feature_branch": "feature/session-calendar-integration",
+    "estimated_hours": 9,
+    "contingency_hours": 3,
+    "total_estimated_hours": 12,
+    "timezone_strategy": "Central Time (America/Chicago) for calculations, Mountain Time (America/Denver) for display",
+    "test_driven": true,
+    "parallel_execution": false,
+    "execution_mode": "sequential_only"
+  },
+
+  "plan_summary": "# Trading Sessions & Calendar Integration - Implementation Plan\n\n## Executive Summary\n\nIntegrate the existing TradingCalendar system into the custom portfolio infrastructure by wiring pre-built session definitions into the portfolio runner and executor. **Source of truth: Central Time (CT)** for all calculations; **Mountain Time (MT)** for user-facing configs/display. Test-driven approach with comprehensive unit tests integrated into `--mode validate` that run before every backtest and live session.\n\n**Critical Success Factor**: Use existing battle-tested code (TradingCalendar class, session definitions from example files) and wire together with rigorous timezone handling and test coverage. No overengineering.\n\n---\n\n## Architecture Decisions\n\n### 1. Timezone Strategy\n- **Internal Calculations**: Central Time (America/Chicago) - ALL session times, platform rules, calendar logic\n- **User-Facing**: Mountain Time (America/Denver) - Display, logs, configuration input\n- **Conversion Layer**: Explicit CT↔MT conversion at display/input boundaries only\n- **DST Handling**: UTC→CT conversions MUST check DST status; CT↔MT conversions safe (same DST schedule)\n\n### 2. Backtest Enforcement\n- **Default**: `ENFORCE_SESSIONS_IN_BACKTEST=true` - Sessions enforced by default for realistic results\n- **Override**: Can disable for signal exploration, but must explicitly opt out\n\n### 3. Failure Mode (Live Trading)\n- **Calendar Creation Failure**: Hard fail - abort startup completely\n- **Rationale**: Never violate TopStepX rules; better to not trade than trade incorrectly\n- **Emergency Override**: Manual env var `CALENDAR_EMERGENCY_DISABLE=true` for critical situations\n\n---\n\n## Implementation Approach\n\n**Test-Driven Development**: All tests written FIRST (Phase 0), should fail before implementation. After implementation (Phase 9), all tests must pass.\n\n**Sequential Execution**: Every task completed in order, no parallel work. Each task has explicit dependencies.\n\n**Risk Mitigation**: High-risk areas (DST transitions, cross-midnight sessions, weekend blackouts) have dedicated unit tests.\n\n**Rollback Strategy**: Multiple levels (env var disable, stub revert, git revert) for emergency situations.\n\n---\n\n## Success Criteria\n\n- All unit tests pass (10+ timezone/session tests)\n- Backtest with enforcement shows fewer trades than without\n- No trades during maintenance windows or weekend blackouts when enforced\n- Calendar creation failure aborts live trading startup\n- All times displayed in Mountain Time, calculated in Central Time\n- Documentation complete and accurate",
+
+  "tasks": [
+    {
+      "task_id": 1,
+      "phase": "Phase 0: Test-Driven Development",
+      "task_name": "Create test file structure",
+      "description": "Create tests/test_trading_calendar_sessions.py with imports and test class structure. This file will contain all unit tests that must pass before implementation is considered complete.",
+      "depends_on": [],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [],
+      "unit_test": {
+        "test_file": "tests/test_trading_calendar_sessions.py",
+        "test_description": "N/A - this task creates the test file itself",
+        "test_command": "ls -la tests/test_trading_calendar_sessions.py",
+        "expected_behavior": "File exists with proper structure",
+        "results": null
+      }
+    },
+    {
+      "task_id": 2,
+      "phase": "Phase 0: Test-Driven Development",
+      "task_name": "Write cross-midnight session test",
+      "description": "Write test_cross_midnight_session_australia_active() that validates Australia session (17:00 CT → 02:00 CT next day) correctly identifies active status at 23:59 CT and 00:01 CT without time-dependent logic. Uses fixed datetime values.",
+      "depends_on": [1],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "Risk: Day boundary logic may fail if date rollover not handled explicitly",
+        "Risk: Timezone-naive datetime objects could cause incorrect comparisons"
+      ],
+      "unit_test": {
+        "test_file": "tests/test_trading_calendar_sessions.py",
+        "test_description": "Validates cross-midnight session (17:00→02:00 CT) with fixed datetimes at 23:59 and 00:01",
+        "test_command": "pytest tests/test_trading_calendar_sessions.py::test_cross_midnight_session_australia_active -v",
+        "expected_behavior": "SHOULD FAIL before implementation. After implementation: Both 23:59 CT Jan 15 and 00:01 CT Jan 16 should return session ACTIVE. 02:01 CT Jan 16 should return INACTIVE.",
+        "results": null
+      }
+    },
+    {
+      "task_id": 3,
+      "phase": "Phase 0: Test-Driven Development",
+      "task_name": "Write weekend blackout test",
+      "description": "Write test_weekend_blackout_enforcement() that validates Friday 14:00 CT close → Sunday 16:00 CT open prevents all trading during Saturday and Sunday morning. Tests 5 checkpoints: Fri 13:59 (allow), Fri 14:01 (block), Sat 12:00 (block), Sun 15:59 (block), Sun 16:01 (allow).",
+      "depends_on": [1],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "Risk: Weekday constants (4=Friday, 5=Saturday, 6=Sunday) may differ across systems",
+        "Risk: Midnight transition from Sunday to Monday during blackout period"
+      ],
+      "unit_test": {
+        "test_file": "tests/test_trading_calendar_sessions.py",
+        "test_description": "Validates weekend blackout with 5 fixed checkpoints across Fri/Sat/Sun",
+        "test_command": "pytest tests/test_trading_calendar_sessions.py::test_weekend_blackout_enforcement -v",
+        "expected_behavior": "SHOULD FAIL before implementation. After implementation: Trading allowed Fri before 14:00 CT, blocked Fri after 14:00 CT through Sun 15:59 CT, allowed Sun after 16:00 CT.",
+        "results": null
+      }
+    },
+    {
+      "task_id": 4,
+      "phase": "Phase 0: Test-Driven Development",
+      "task_name": "Write platform maintenance override test",
+      "description": "Write test_platform_maintenance_overrides_session() that validates when both platform maintenance and session times overlap, platform layer wins. Test: Session active but platform maintenance window → must return can_enter_orders=False and must_be_flat=True.",
+      "depends_on": [1],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "Risk: Two-layer logic (platform + session) may have precedence bugs"
+      ],
+      "unit_test": {
+        "test_file": "tests/test_trading_calendar_sessions.py",
+        "test_description": "Validates platform maintenance overrides active session",
+        "test_command": "pytest tests/test_trading_calendar_sessions.py::test_platform_maintenance_overrides_session -v",
+        "expected_behavior": "SHOULD FAIL before implementation. After implementation: During NY session but platform maintenance (14:00-16:00 CT), must return blocked status.",
+        "results": null
+      }
+    },
+    {
+      "task_id": 5,
+      "phase": "Phase 0: Test-Driven Development",
+      "task_name": "Write DST spring forward test",
+      "description": "Write test_dst_transition_spring_forward() that validates March 10, 2024 02:00 CT spring forward to 03:00 CT. Tests: 01:59 CT valid, 02:00 CT DOES NOT EXIST (pytz should raise exception), 03:00 CT valid.",
+      "depends_on": [1],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "CRITICAL: DST transitions are the #1 source of timezone bugs",
+        "Risk: pytz.localize may not raise exception on non-existent times if not configured correctly",
+        "Risk: Non-existent time (2:00-3:00 AM) could cause silent failures"
+      ],
+      "unit_test": {
+        "test_file": "tests/test_trading_calendar_sessions.py",
+        "test_description": "Validates DST spring-forward handling (2:00 AM doesn't exist)",
+        "test_command": "pytest tests/test_trading_calendar_sessions.py::test_dst_transition_spring_forward -v",
+        "expected_behavior": "SHOULD FAIL before implementation. After implementation: 01:59 CT and 03:00 CT pass, 02:00 CT raises pytz.NonExistentTimeError or handled gracefully.",
+        "results": null
+      }
+    },
+    {
+      "task_id": 6,
+      "phase": "Phase 0: Test-Driven Development",
+      "task_name": "Write DST fall back test",
+      "description": "Write test_dst_transition_fall_back() that validates November 3, 2024 02:00 CT fall back to 01:00 CT. Tests: 01:59 CT first occurrence valid, 01:59 CT second occurrence valid but ambiguous. Use is_dst flag to distinguish.",
+      "depends_on": [1],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "CRITICAL: DST fall-back creates ambiguous times (1:00-2:00 AM occurs twice)",
+        "Risk: Without is_dst flag, same timestamp could represent two different moments",
+        "Parking lot: Document which occurrence (first/second) is used in edge cases"
+      ],
+      "unit_test": {
+        "test_file": "tests/test_trading_calendar_sessions.py",
+        "test_description": "Validates DST fall-back handling (1:00 AM occurs twice)",
+        "test_command": "pytest tests/test_trading_calendar_sessions.py::test_dst_transition_fall_back -v",
+        "expected_behavior": "SHOULD FAIL before implementation. After implementation: Both occurrences of 01:59 CT handled correctly with is_dst disambiguation.",
+        "results": null
+      }
+    },
+    {
+      "task_id": 7,
+      "phase": "Phase 0: Test-Driven Development",
+      "task_name": "Write session countdown test",
+      "description": "Write test_session_countdown_calculations() that validates _calculate_close_timing() returns correct countdown seconds. Fixed test: 10:00 CT → 14:00 CT force flat = exactly 14,400 seconds countdown. Verify countdown never goes negative (clamped to 0 at deadline).",
+      "depends_on": [1],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "Risk: Countdown calculation may not account for DST hour changes",
+        "Risk: Negative countdown values could cause UI/logic issues"
+      ],
+      "unit_test": {
+        "test_file": "tests/test_trading_calendar_sessions.py",
+        "test_description": "Validates countdown calculation accuracy and non-negative constraint",
+        "test_command": "pytest tests/test_trading_calendar_sessions.py::test_session_countdown_calculations -v",
+        "expected_behavior": "SHOULD FAIL before implementation. After implementation: 10:00→14:00 CT = 14,400 seconds exactly, countdown ≥ 0 always.",
+        "results": null
+      }
+    },
+    {
+      "task_id": 8,
+      "phase": "Phase 0: Test-Driven Development",
+      "task_name": "Write UTC to Central conversion test",
+      "description": "Write test_utc_to_central_with_dst() that validates UTC timestamps convert correctly accounting for DST. Summer (CDT): UTC-5, Winter (CST): UTC-6. Tests both summer and winter conversions with fixed UTC timestamps.",
+      "depends_on": [1],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "CRITICAL: Databento provides UTC timestamps, incorrect conversion breaks all trading logic",
+        "Risk: Hardcoded UTC offset (-5/-6) without DST check causes 1-hour errors",
+        "Risk: Timezone-naive datetime comparison with timezone-aware datetime"
+      ],
+      "unit_test": {
+        "test_file": "tests/test_trading_calendar_sessions.py",
+        "test_description": "Validates UTC→CT conversion with DST handling",
+        "test_command": "pytest tests/test_trading_calendar_sessions.py::test_utc_to_central_with_dst -v",
+        "expected_behavior": "SHOULD FAIL before implementation. After implementation: UTC summer converts to CDT (UTC-5), UTC winter converts to CST (UTC-6).",
+        "results": null
+      }
+    },
+    {
+      "task_id": 9,
+      "phase": "Phase 0: Test-Driven Development",
+      "task_name": "Write strategy without sessions test",
+      "description": "Write test_strategy_without_allowed_sessions() that validates strategies missing allowed_sessions default to 24/7 trading with warning log. Should NOT block trading.",
+      "depends_on": [1],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "Risk: Backward compatibility break if old strategies suddenly blocked",
+        "Parking lot: Add migration guide for existing strategies to specify sessions explicitly"
+      ],
+      "unit_test": {
+        "test_file": "tests/test_trading_calendar_sessions.py",
+        "test_description": "Validates backward compatibility for strategies without allowed_sessions",
+        "test_command": "pytest tests/test_trading_calendar_sessions.py::test_strategy_without_allowed_sessions -v",
+        "expected_behavior": "SHOULD FAIL before implementation. After implementation: Strategy trades 24/7, warning logged, no blocking.",
+        "results": null
+      }
+    },
+    {
+      "task_id": 10,
+      "phase": "Phase 0: Test-Driven Development",
+      "task_name": "Write multiple symbols different sessions test",
+      "description": "Write test_multiple_symbols_different_sessions() that validates ES (NY only) and MGC (multi-session) enforce correctly. ES: block outside NY hours. MGC: allow Australia/Asia/London/NY hours.",
+      "depends_on": [1],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "Risk: Per-symbol session mapping may not be thread-safe in multi-strategy context",
+        "Risk: Session overlap logic (MGC allows multiple sessions) may have edge cases"
+      ],
+      "unit_test": {
+        "test_file": "tests/test_trading_calendar_sessions.py",
+        "test_description": "Validates per-symbol session enforcement with different rules",
+        "test_command": "pytest tests/test_trading_calendar_sessions.py::test_multiple_symbols_different_sessions -v",
+        "expected_behavior": "SHOULD FAIL before implementation. After implementation: ES blocked outside 07:30-14:00 CT, MGC allowed during extended hours.",
+        "results": null
+      }
+    },
+    {
+      "task_id": 11,
+      "phase": "Phase 0: Test-Driven Development",
+      "task_name": "Write calendar creation failure test",
+      "description": "Write test_calendar_creation_failure_aborts() that validates if calendar creation fails in live mode, startup aborts with SystemExit. Mock pytz import failure to trigger error path.",
+      "depends_on": [1],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "CRITICAL: Must never allow live trading without calendar (TopStepX compliance)",
+        "Risk: SystemExit may not be caught properly in test framework",
+        "Parking lot: Document emergency override procedure for critical situations"
+      ],
+      "unit_test": {
+        "test_file": "tests/test_trading_calendar_sessions.py",
+        "test_description": "Validates hard fail on calendar creation error in live mode",
+        "test_command": "pytest tests/test_trading_calendar_sessions.py::test_calendar_creation_failure_aborts -v",
+        "expected_behavior": "SHOULD FAIL before implementation. After implementation: Live mode raises SystemExit, backtest mode continues with warning.",
+        "results": null
+      }
+    },
+    {
+      "task_id": 12,
+      "phase": "Phase 0: Test-Driven Development",
+      "task_name": "Run all unit tests (pre-implementation baseline)",
+      "description": "Run pytest on all tests created in tasks 2-11. ALL TESTS SHOULD FAIL at this stage. Document failure count and specific failures. This establishes the baseline before implementation begins.",
+      "depends_on": [2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "If tests pass before implementation, tests are not correctly validating functionality"
+      ],
+      "unit_test": {
+        "test_file": "tests/test_trading_calendar_sessions.py",
+        "test_description": "Run all tests to establish pre-implementation baseline (all should fail)",
+        "test_command": "pytest tests/test_trading_calendar_sessions.py -v --tb=short",
+        "expected_behavior": "ALL 10 tests FAIL. Document exact failure messages for each test.",
+        "results": null
+      }
+    },
+    {
+      "task_id": 13,
+      "phase": "Phase 1: Session Definitions",
+      "task_name": "Add TRADING_SESSIONS to portfolio_manager.py",
+      "description": "Add TRADING_SESSIONS dictionary to custom_portfolio/strategies/portfolio_manager.py after line 53 (after SESSION_ABBREVIATIONS). Define all 5 sessions (24/7, Australia, Asia, London, New_York) with times in Central Time. Include comprehensive documentation comments about timezone, DST, and TopStepX rules.",
+      "depends_on": [12],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "Risk: Session times must exactly match TopStepX documentation",
+        "Parking lot: Add annual review reminder to check for TopStepX rule changes",
+        "Parking lot: Verify CME market hours haven't changed"
+      ],
+      "unit_test": null
+    },
+    {
+      "task_id": 14,
+      "phase": "Phase 1: Session Definitions",
+      "task_name": "Add TOPSTEPX_PLATFORM_CONFIG to portfolio_manager.py",
+      "description": "Add TOPSTEPX_PLATFORM_CONFIG dictionary to custom_portfolio/strategies/portfolio_manager.py immediately after TRADING_SESSIONS. Define platform-level restrictions: daily_stop_new_orders, daily_force_flat, daily_resume, weekend_close, weekend_open. All times in Central Time with documentation.",
+      "depends_on": [13],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "CRITICAL: Platform times must match https://help.topstep.com/en/articles/8284206",
+        "Risk: TopStepX may change maintenance windows without notice",
+        "Parking lot: Add health check to verify times still match TopStepX API/docs"
+      ],
+      "unit_test": null
+    },
+    {
+      "task_id": 15,
+      "phase": "Phase 2: Timezone Utilities",
+      "task_name": "Create timezone_utils.py file",
+      "description": "Create new file custom_portfolio/tools/timezone_utils.py with module docstring explaining Central Time (calculations) vs Mountain Time (display) architecture. Define CENTRAL_TZ and MOUNTAIN_TZ timezone objects.",
+      "depends_on": [14],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [],
+      "unit_test": null
+    },
+    {
+      "task_id": 16,
+      "phase": "Phase 2: Timezone Utilities",
+      "task_name": "Implement timezone conversion functions",
+      "description": "Implement 4 functions in timezone_utils.py: now_central(), utc_to_central(), central_to_mountain_display(), parse_time_string_central(). Each with comprehensive docstrings, error handling for naive datetimes, and DST handling using pytz.localize with is_dst parameter.",
+      "depends_on": [15],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "CRITICAL: utc_to_central() must handle DST correctly (UTC-5 summer, UTC-6 winter)",
+        "Risk: pytz.localize without is_dst=None may silently guess during ambiguous times",
+        "Risk: Mixing timezone-aware and naive datetimes causes TypeError"
+      ],
+      "unit_test": {
+        "test_file": "tests/test_timezone_utils.py",
+        "test_description": "Unit tests for each timezone conversion function",
+        "test_command": "pytest tests/test_timezone_utils.py -v",
+        "expected_behavior": "All conversion functions work correctly, DST handled, errors raised for naive datetimes",
+        "results": null
+      }
+    },
+    {
+      "task_id": 17,
+      "phase": "Phase 2: Timezone Utilities",
+      "task_name": "Run timezone utility tests",
+      "description": "Create and run tests/test_timezone_utils.py to validate all timezone conversion functions work correctly. Test DST transitions, UTC conversions, display formatting, and error cases (naive datetimes).",
+      "depends_on": [16],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [],
+      "unit_test": {
+        "test_file": "tests/test_timezone_utils.py",
+        "test_description": "Comprehensive timezone utility function validation",
+        "test_command": "pytest tests/test_timezone_utils.py -v",
+        "expected_behavior": "All tests pass, DST handled correctly, naive datetime errors raised",
+        "results": null
+      }
+    },
+    {
+      "task_id": 18,
+      "phase": "Phase 3: Create Calendar",
+      "task_name": "Replace create_calendar() stub in run_portfolio.py",
+      "description": "Replace create_calendar() function stub (lines 529-540) in custom_portfolio/strategies/run_portfolio.py with full implementation. Import TradingCalendar, TRADING_SESSIONS, TOPSTEPX_PLATFORM_CONFIG, CENTRAL_TZ. Create calendar, register sessions, add error handling with hard fail for live mode, emergency override support, and comprehensive logging.",
+      "depends_on": [17],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "CRITICAL: Must hard fail in live mode if calendar creation fails (safety requirement)",
+        "Risk: ImportError for TradingCalendar would break all trading",
+        "Parking lot: Add monitoring/alerting for calendar creation failures",
+        "Parking lot: Document emergency override procedure (CALENDAR_EMERGENCY_DISABLE)"
+      ],
+      "unit_test": null
+    },
+    {
+      "task_id": 19,
+      "phase": "Phase 3: Create Calendar",
+      "task_name": "Test calendar creation manually",
+      "description": "Manually test create_calendar() function by running it in isolation. Verify TradingCalendar object created, sessions registered, timezone set to CENTRAL_TZ, no errors. Test both success and failure paths (mock ImportError).",
+      "depends_on": [18],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "Risk: Manual test may not catch all edge cases"
+      ],
+      "unit_test": {
+        "test_file": "N/A - manual test",
+        "test_description": "Manual execution of create_calendar() function",
+        "test_command": "python -c 'from custom_portfolio.strategies.run_portfolio import create_calendar; cal = create_calendar(); print(cal)'",
+        "expected_behavior": "Calendar object created successfully, sessions registered, no errors",
+        "results": null
+      }
+    },
+    {
+      "task_id": 20,
+      "phase": "Phase 4: Wire into Backtest",
+      "task_name": "Modify PortfolioStrategy.initialize()",
+      "description": "Modify PortfolioStrategy.initialize() in run_portfolio.py (around line 589). Add: call create_calendar(), read ENFORCE_SESSIONS_IN_BACKTEST env var (default true), calculate ignore_calendar flag, pass calendar and ignore_calendar to PortfolioManager, add logging for enforcement mode.",
+      "depends_on": [19],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "Risk: Default ENFORCE_SESSIONS_IN_BACKTEST=true may break existing workflows",
+        "Parking lot: Communicate change to all users (default now enforces sessions)",
+        "Risk: ignore_calendar logic inverted (double-negative confusion)"
+      ],
+      "unit_test": null
+    },
+    {
+      "task_id": 21,
+      "phase": "Phase 4: Wire into Backtest",
+      "task_name": "Test backtest with enforcement OFF",
+      "description": "Set ENFORCE_SESSIONS_IN_BACKTEST=false in .env, run short backtest (1 week), verify: (1) trades occur at ALL times including outside sessions, (2) no session restriction logs, (3) trade count higher than enforced mode. Document trade count and timestamps.",
+      "depends_on": [20],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "Risk: If no trades occur even with enforcement off, strategy may have other issues"
+      ],
+      "unit_test": {
+        "test_file": "N/A - integration test",
+        "test_description": "Backtest with sessions NOT enforced",
+        "test_command": "ENFORCE_SESSIONS_IN_BACKTEST=false python custom_portfolio/strategies/run_portfolio.py --mode backtest",
+        "expected_behavior": "Trades occur at all times, no session blocking, higher trade count than enforced mode",
+        "results": null
+      }
+    },
+    {
+      "task_id": 22,
+      "phase": "Phase 4: Wire into Backtest",
+      "task_name": "Test backtest with enforcement ON",
+      "description": "Set ENFORCE_SESSIONS_IN_BACKTEST=true in .env, run same backtest as task 21, verify: (1) fewer trades than non-enforced, (2) no trades during maintenance (14:00-16:00 CT), (3) no trades during weekend (Fri 14:00 - Sun 16:00 CT), (4) logs show session restriction messages. Compare trade counts with task 21.",
+      "depends_on": [21],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "CRITICAL: If trade count same as non-enforced, session gating not working",
+        "Risk: Maintenance window times may be incorrect if trades occur during 14:00-16:00 CT",
+        "Parking lot: Create automated test to detect session enforcement regressions"
+      ],
+      "unit_test": {
+        "test_file": "N/A - integration test",
+        "test_description": "Backtest with sessions enforced (realistic mode)",
+        "test_command": "ENFORCE_SESSIONS_IN_BACKTEST=true python custom_portfolio/strategies/run_portfolio.py --mode backtest",
+        "expected_behavior": "Fewer trades, no trades during maintenance/weekend, session blocking logs present",
+        "results": null
+      }
+    },
+    {
+      "task_id": 23,
+      "phase": "Phase 5: Wire into Live",
+      "task_name": "Modify run_live() function",
+      "description": "Modify run_live() in run_portfolio.py (around line 907). Add: call create_calendar() before PortfolioManager creation, check for None with hard fail, emergency override check (CALENDAR_EMERGENCY_DISABLE), pass calendar to PortfolioManager with ignore_calendar=False (always enforce in live), comprehensive logging.",
+      "depends_on": [22],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "CRITICAL: Live mode must NEVER start without calendar (TopStepX compliance)",
+        "Risk: Emergency override (CALENDAR_EMERGENCY_DISABLE) could be misused",
+        "Parking lot: Add monitoring/alerting if live mode starts with calendar disabled",
+        "Parking lot: Document procedure for when emergency override is acceptable"
+      ],
+      "unit_test": null
+    },
+    {
+      "task_id": 24,
+      "phase": "Phase 5: Wire into Live",
+      "task_name": "Test live mode calendar creation (dry run)",
+      "description": "Dry-run test of live mode (DON'T actually connect to broker). Verify: (1) create_calendar() called, (2) calendar creation failure aborts startup, (3) emergency override works (CALENDAR_EMERGENCY_DISABLE=true), (4) proper logging at all stages. Mock broker connection to avoid real trading.",
+      "depends_on": [23],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "Risk: Dry run may not catch issues that only appear with real broker connection"
+      ],
+      "unit_test": {
+        "test_file": "N/A - dry run test",
+        "test_description": "Live mode calendar initialization (no broker connection)",
+        "test_command": "Mock broker, run live mode startup sequence, verify calendar behavior",
+        "expected_behavior": "Calendar created, hard fail on error works, emergency override works",
+        "results": null
+      }
+    },
+    {
+      "task_id": 25,
+      "phase": "Phase 6: Environment Config",
+      "task_name": "Update env.example with session variables",
+      "description": "Add to env.example (after line 28): ENFORCE_SESSIONS_IN_BACKTEST=true (with documentation), CALENDAR_EMERGENCY_DISABLE=false (with warnings). Include comments explaining when to use each flag and the risks.",
+      "depends_on": [24],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "Parking lot: Add migration notes for users with existing .env files",
+        "Parking lot: Document that CALENDAR_EMERGENCY_DISABLE should NEVER be used in production"
+      ],
+      "unit_test": null
+    },
+    {
+      "task_id": 26,
+      "phase": "Phase 7: Documentation",
+      "task_name": "Update strategy_template.py docstring",
+      "description": "Update docstring in custom_portfolio/strategies/templates/strategy_template.py (lines 1-8). Add reference to TRADING_SESSIONS location in portfolio_manager.py, explain Central Time (internal) vs Mountain Time (display), clarify allowed_sessions behavior.",
+      "depends_on": [25],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "Parking lot: Create migration guide for existing strategies to add allowed_sessions"
+      ],
+      "unit_test": null
+    },
+    {
+      "task_id": 27,
+      "phase": "Phase 8: Integration Testing",
+      "task_name": "Integrate tests into validate mode",
+      "description": "Modify validate_only() function in run_portfolio.py. Add pytest call to run tests/test_trading_calendar_sessions.py BEFORE strategy loading. If tests fail, abort validation with error. Display test results using TerminalFormatter.",
+      "depends_on": [26],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "Risk: pytest not installed in environment would break validation",
+        "Parking lot: Add pytest to requirements if not already present"
+      ],
+      "unit_test": null
+    },
+    {
+      "task_id": 28,
+      "phase": "Phase 8: Integration Testing",
+      "task_name": "Run full validation suite",
+      "description": "Run python custom_portfolio/strategies/run_portfolio.py --mode validate. Verify: (1) all calendar unit tests pass, (2) strategies load successfully, (3) no validation errors, (4) comprehensive output showing test results and strategy validation.",
+      "depends_on": [27],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "CRITICAL: If validation fails, implementation is not complete"
+      ],
+      "unit_test": {
+        "test_file": "N/A - integration test",
+        "test_description": "Full validation mode with integrated calendar tests",
+        "test_command": "python custom_portfolio/strategies/run_portfolio.py --mode validate",
+        "expected_behavior": "All tests pass, strategies load, validation succeeds",
+        "results": null
+      }
+    },
+    {
+      "task_id": 29,
+      "phase": "Phase 8: Integration Testing",
+      "task_name": "Compare backtest results (enforced vs non-enforced)",
+      "description": "Run two identical backtests over 1-month period: (1) ENFORCE_SESSIONS_IN_BACKTEST=false, (2) ENFORCE_SESSIONS_IN_BACKTEST=true. Document and compare: total trades, PnL, trade timestamps, maintenance window activity. Enforced mode should have significantly fewer trades and NO trades during restricted hours.",
+      "depends_on": [28],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "CRITICAL: If trade counts are similar, session enforcement is not working",
+        "Risk: Performance metrics (Sharpe, returns) may be significantly different between modes",
+        "Parking lot: Document expected performance difference for user expectations"
+      ],
+      "unit_test": {
+        "test_file": "N/A - comparative analysis",
+        "test_description": "Side-by-side backtest comparison",
+        "test_command": "Run both modes, generate comparison report",
+        "expected_behavior": "Enforced mode: fewer trades, no maintenance/weekend trades, lower PnL but more realistic",
+        "results": null
+      }
+    },
+    {
+      "task_id": 30,
+      "phase": "Phase 8: Integration Testing",
+      "task_name": "Manual verification against TopStepX docs",
+      "description": "Manually verify all session times in TRADING_SESSIONS and TOPSTEPX_PLATFORM_CONFIG match TopStepX documentation at https://help.topstep.com/en/articles/8284206. Check: maintenance windows, weekend hours, session start/stop times. Document any discrepancies.",
+      "depends_on": [29],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "CRITICAL: Incorrect times could violate TopStepX rules and risk account",
+        "Parking lot: Set calendar reminder for annual review of TopStepX rules",
+        "Parking lot: Create automated checker to fetch TopStepX API times if available"
+      ],
+      "unit_test": {
+        "test_file": "N/A - manual verification",
+        "test_description": "Compare implementation times with TopStepX documentation",
+        "test_command": "Manual review of https://help.topstep.com/en/articles/8284206",
+        "expected_behavior": "All times match TopStepX docs exactly, no discrepancies",
+        "results": null
+      }
+    },
+    {
+      "task_id": 31,
+      "phase": "Phase 9: Final Validation",
+      "task_name": "Run all unit tests (post-implementation)",
+      "description": "Run pytest tests/test_trading_calendar_sessions.py -v. ALL 10 tests created in Phase 0 MUST PASS. If any test fails, implementation is incomplete. Document pass/fail for each test and fix any failures before proceeding.",
+      "depends_on": [30],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "CRITICAL: Any test failure means implementation has bugs that must be fixed"
+      ],
+      "unit_test": {
+        "test_file": "tests/test_trading_calendar_sessions.py",
+        "test_description": "Final validation - all tests must pass",
+        "test_command": "pytest tests/test_trading_calendar_sessions.py -v",
+        "expected_behavior": "ALL 10 tests PASS (contrast with task 12 where all failed)",
+        "results": null
+      }
+    },
+    {
+      "task_id": 32,
+      "phase": "Phase 9: Final Validation",
+      "task_name": "Create rollback documentation",
+      "description": "Create ROLLBACK.md document with 3-level rollback procedure: Level 1 (env var disable), Level 2 (stub revert), Level 3 (git revert). Include commands, impact assessment, and when to use each level. Add to repository root.",
+      "depends_on": [31],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "Parking lot: Test each rollback level to ensure procedures work"
+      ],
+      "unit_test": null
+    },
+    {
+      "task_id": 33,
+      "phase": "Phase 9: Final Validation",
+      "task_name": "Review all risks and parking lot items",
+      "description": "Review risks_and_parking_lot fields from all 33 tasks. For each high/critical risk: verify mitigation in place. For each parking lot item: create GitHub issue or document in project backlog. Ensure no unaddressed critical risks remain.",
+      "depends_on": [32],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [
+        "This task accumulates all previous risks for final review"
+      ],
+      "unit_test": null
+    },
+    {
+      "task_id": 34,
+      "phase": "Phase 9: Final Validation",
+      "task_name": "Mark implementation complete",
+      "description": "Final checklist verification: (1) All 10 unit tests pass, (2) Backtest comparison shows session enforcement working, (3) Manual TopStepX verification complete, (4) Documentation updated, (5) Rollback procedures documented, (6) All risks reviewed. If all items checked, mark implementation complete and merge feature branch.",
+      "depends_on": [33],
+      "status": "pending",
+      "completion_notes": "",
+      "risks_and_parking_lot": [],
+      "unit_test": {
+        "test_file": "N/A - checklist verification",
+        "test_description": "Final implementation completion checklist",
+        "test_command": "Manual review of all success criteria",
+        "expected_behavior": "All criteria met, implementation complete, ready to merge",
+        "results": null
+      }
+    }
+  ],
+
+  "rollback_procedures": {
+    "level_1": {
+      "name": "Environment Variable Disable (Non-Destructive)",
+      "commands": [
+        "# In .env file:",
+        "ENFORCE_SESSIONS_IN_BACKTEST=false",
+        "# For live trading emergency (NOT RECOMMENDED):",
+        "CALENDAR_EMERGENCY_DISABLE=true"
+      ],
+      "impact": "System continues running, sessions not enforced",
+      "risk": "May violate TopStepX rules in live trading",
+      "when_to_use": "Quick disable for testing or if calendar has bugs but need to continue operations"
+    },
+    "level_2": {
+      "name": "Revert create_calendar() to Stub",
+      "file": "custom_portfolio/strategies/run_portfolio.py",
+      "change": "Replace create_calendar() implementation with: return None",
+      "impact": "All calendar logic bypassed, same as Level 1",
+      "risk": "Same as Level 1",
+      "when_to_use": "If environment variable disable doesn't work or calendar creation causing crashes"
+    },
+    "level_3": {
+      "name": "Git Revert (Full Rollback - Destructive)",
+      "commands": [
+        "git log --oneline -10",
+        "git revert <commit-hash>",
+        "# Or hard reset (DESTRUCTIVE):",
+        "git reset --hard <commit-hash>"
+      ],
+      "impact": "Complete removal of calendar system, all work lost",
+      "risk": "Lose all implementation work",
+      "when_to_use": "Critical production issue, no other option works, must completely remove feature"
+    }
+  },
+
+  "success_criteria": {
+    "unit_tests": "All 10+ Phase 0 unit tests pass",
+    "integration": "Calendar tests integrated into --mode validate and pass",
+    "backtest_comparison": "Enforced backtest shows fewer trades than non-enforced",
+    "maintenance_window": "No trades during 14:00-16:00 CT when enforced",
+    "weekend_blackout": "No trades Fri 14:00 CT - Sun 16:00 CT when enforced",
+    "cross_midnight": "Australia/Asia 17:00→02:00 CT sessions work correctly",
+    "dst_transitions": "March/November DST tests pass",
+    "backward_compatibility": "Strategies without allowed_sessions default to 24/7 with warning",
+    "live_safety": "Calendar creation failure aborts live trading startup",
+    "emergency_disable": "CALENDAR_EMERGENCY_DISABLE flag works",
+    "timezone_display": "All user-facing times in Mountain Time, calculations in Central Time",
+    "documentation": "Template, env.example, and rollback docs updated",
+    "rollback_tested": "All 3 rollback levels tested and working"
+  }
+}

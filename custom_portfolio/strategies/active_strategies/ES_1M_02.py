@@ -15,7 +15,7 @@ Strategy Type: Mean reversion
 import pandas_ta as ta
 
 # Debug logging toggle (set to False to disable)
-DEBUG_LOGGING = True
+DEBUG_LOGGING = False
 
 STRATEGY_CONFIG = {
     "strategy_id": "",

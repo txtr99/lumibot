@@ -549,12 +549,6 @@ class MultiStrategyExecutorEnhanced:
         # Step 2: Process each strategy independently
         for strategy_state in self.strategies:
             try:
-                # DEBUG: Log start of ES_1M_02 processing
-                if strategy_state.strategy_id == "ES_1M_02":
-                    import sys
-
-                    print("\n[DEBUG ES_1M_02] Starting iteration for ES_1M_02", file=sys.stderr, flush=True)
-
                 per_strategy_start = time.perf_counter()
                 # 2a. Get cached data (no API call)
                 self._log_verbose(
@@ -567,10 +561,6 @@ class MultiStrategyExecutorEnhanced:
                     self.logger.warning(
                         f"No cached data for {strategy_state.strategy_id} " f"({strategy_state.symbol}), skipping"
                     )
-                    if strategy_state.strategy_id == "ES_1M_02":
-                        import sys
-
-                        print("  >>> SKIPPING: No cached data", file=sys.stderr, flush=True)
                     continue
 
                 # Convert to DataFrame if needed
@@ -618,14 +608,6 @@ class MultiStrategyExecutorEnhanced:
 
                 # If flat and not enough history, skip new entries (still allow exits if position exists)
                 if virtual_qty == 0 and len(df) < self.min_bars:
-                    if strategy_state.strategy_id == "ES_1M_02":
-                        import sys
-
-                        print(
-                            f"  >>> SKIPPING: Insufficient bars ({len(df)} < {self.min_bars})",
-                            file=sys.stderr,
-                            flush=True,
-                        )
                     continue
 
                 # 2b. If already in position, first check for bracket hits
@@ -661,25 +643,9 @@ class MultiStrategyExecutorEnhanced:
                         allowed_sessions=strategy_state.allowed_sessions,
                     )
 
-                    # DEBUG: Log for ES_1M_02
-                    if strategy_state.strategy_id == "ES_1M_02":
-                        import sys
-
-                        print("\n[DEBUG ES_1M_02] Calendar check:", file=sys.stderr, flush=True)
-                        print(f"  platform_open: {status.platform_open}", file=sys.stderr, flush=True)
-                        print(f"  can_enter_orders: {status.can_enter_orders}", file=sys.stderr, flush=True)
-                        print(f"  must_be_flat: {status.must_be_flat}", file=sys.stderr, flush=True)
-                        print(f"  virtual_qty: {virtual_qty}", file=sys.stderr, flush=True)
-                        if not status.platform_open:
-                            print(f"  platform_reason: {status.platform_reason}", file=sys.stderr, flush=True)
-
                     # 2d. Skip if platform closed
                     if not status.platform_open:
                         self.logger.debug(f"{strategy_state.strategy_id}: Platform closed ({status.platform_reason})")
-                        if strategy_state.strategy_id == "ES_1M_02":
-                            import sys
-
-                            print("  >>> SKIPPING: Platform closed", file=sys.stderr, flush=True)
                         continue
 
                     # 2e. Skip if can't enter new positions
@@ -687,10 +653,6 @@ class MultiStrategyExecutorEnhanced:
                         self.logger.debug(
                             f"{strategy_state.strategy_id}: Cannot enter new orders (session restrictions)"
                         )
-                        if strategy_state.strategy_id == "ES_1M_02":
-                            import sys
-
-                            print("  >>> SKIPPING: Cannot enter orders (session)", file=sys.stderr, flush=True)
                         continue
 
                     # 2f. Force close if required by calendar
@@ -705,17 +667,9 @@ class MultiStrategyExecutorEnhanced:
 
                 # 2g. Skip new signals if already in position
                 if virtual_qty != 0:
-                    if strategy_state.strategy_id == "ES_1M_02":
-                        import sys
-
-                        print(f"  >>> SKIPPING: Already in position (qty={virtual_qty})", file=sys.stderr, flush=True)
                     continue
 
                 # 2h. Generate signal using strategy-specific logic
-                if strategy_state.strategy_id == "ES_1M_02":
-                    import sys
-
-                    print(f"  >>> Passed all gates - generating signal (bars={len(df)})", file=sys.stderr, flush=True)
                 signal = self._generate_signal_for_strategy(strategy_state, df)
                 strategy_state.last_signal = signal
                 strategy_state.last_signal_time = current_time
@@ -785,6 +739,46 @@ class MultiStrategyExecutorEnhanced:
             f"{_YELLOW}[FLOW] iteration_duration={time.perf_counter() - iter_start:.4f}s "
             f"orders={orders_submitted} cache_hit_rate={cache_stats['hit_rate']:.1f}%{_RESET}"
         )
+
+        # Record equity curve data point
+        if self.enable_snapshots:
+            # Calculate total realized P&L across all strategies
+            total_realized_pnl = sum(s.realized_pnl for s in self.strategies)
+
+            # Calculate total unrealized P&L across all strategies
+            total_unrealized_pnl = 0.0
+            for strategy_state in self.strategies:
+                pos = strategy_state.tracker.get_position(strategy_state.symbol)
+                if pos and pos.quantity != 0 and strategy_state.entry_price is not None:
+                    # Get current price from cached data
+                    try:
+                        market_data = self.shared_data.get_cached_data(
+                            strategy_state.symbol, self.max_lookback, self.timestep
+                        )
+                        if market_data is not None:
+                            df = market_data.df if hasattr(market_data, "df") else market_data
+                            if len(df) > 0:
+                                current_price = df["close"].iloc[-1]
+                                multiplier = 1.0
+                                try:
+                                    from custom_portfolio.data.futures_metadata import get_multiplier
+
+                                    multiplier = get_multiplier(strategy_state.symbol)
+                                except Exception:
+                                    pass
+                                unrealized = (current_price - strategy_state.entry_price) * pos.quantity * multiplier
+                                total_unrealized_pnl += unrealized
+                    except Exception as e:
+                        self.logger.debug(f"Error calculating unrealized P&L for {strategy_state.strategy_id}: {e}")
+
+            # Calculate account balance (realized only) and portfolio value (including unrealized)
+            initial_capital = getattr(self, "shared_initial_capital", 0.0) or getattr(
+                self, "total_initial_capital", 0.0
+            )
+            account_balance = initial_capital + total_realized_pnl
+            portfolio_value = account_balance + total_unrealized_pnl
+
+            self.attribution.record_equity_curve(current_time, account_balance, portfolio_value)
 
         return summary
 

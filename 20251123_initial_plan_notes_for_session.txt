@@ -1,0 +1,742 @@
+     │ Trading Sessions & Calendar Integration - Implementation Plan                                                                                                                       │
+     │                                                                                                                                                                                     │
+     │ Executive Summary                                                                                                                                                                   │
+     │                                                                                                                                                                                     │
+     │ Integrate the existing TradingCalendar system into the custom portfolio infrastructure by wiring pre-built session definitions into the portfolio runner and executor. Source of    │
+     │ truth: Central Time (CT) for all calculations; Mountain Time (MT) for user-facing configs/display. Test-driven approach with comprehensive unit tests integrated into --mode        │
+     │ validate that run before every backtest and live session.                                                                                                                           │
+     │                                                                                                                                                                                     │
+     │ Critical Success Factor: Use existing battle-tested code (TradingCalendar class, session definitions from example files) and wire together with rigorous timezone handling and test │
+     │ coverage. No overengineering.                                                                                                                                                       │
+     │                                                                                                                                                                                     │
+     │ ---                                                                                                                                                                                 │
+     │ Part 1: Critical Architecture Decisions (CEO-Approved)                                                                                                                              │
+     │                                                                                                                                                                                     │
+     │ 1. Timezone Strategy                                                                                                                                                                │
+     │                                                                                                                                                                                     │
+     │ - Internal Calculations: Central Time (America/Chicago) - ALL session times, platform rules, calendar logic                                                                         │
+     │ - User-Facing: Mountain Time (America/Denver) - Display, logs, configuration input                                                                                                  │
+     │ - Conversion Layer: Explicit CT↔MT conversion at display/input boundaries only                                                                                                      │
+     │ - DST Handling: UTC→CT conversions MUST check DST status; CT↔MT conversions safe (same DST schedule)                                                                                │
+     │                                                                                                                                                                                     │
+     │ 2. Backtest Enforcement                                                                                                                                                             │
+     │                                                                                                                                                                                     │
+     │ - Default: ENFORCE_SESSIONS_IN_BACKTEST=true - Sessions enforced by default for realistic results                                                                                   │
+     │ - Override: Can disable for signal exploration, but must explicitly opt out                                                                                                         │
+     │                                                                                                                                                                                     │
+     │ 3. Failure Mode (Live Trading)                                                                                                                                                      │
+     │                                                                                                                                                                                     │
+     │ - Calendar Creation Failure: Hard fail - abort startup completely                                                                                                                   │
+     │ - Rationale: Never violate TopStepX rules; better to not trade than trade incorrectly                                                                                               │
+     │ - Emergency Override: Manual env var CALENDAR_EMERGENCY_DISABLE=true for critical situations                                                                                        │
+     │                                                                                                                                                                                     │
+     │ ---                                                                                                                                                                                 │
+     │ Part 2: Risk Analysis (From Agent Brainstorming)                                                                                                                                    │
+     │                                                                                                                                                                                     │
+     │ HIGH RISK - Must Address                                                                                                                                                            │
+     │                                                                                                                                                                                     │
+     │ R1. DST Transition Errors                                                                                                                                                           │
+     │ - Risk: UTC→CT conversions fail during spring-forward/fall-back                                                                                                                     │
+     │ - Mitigation: Use pytz.localize() with is_dst=None (raises exception on ambiguous times)                                                                                            │
+     │ - Test: Unit test covering March 10, 2024 02:00 CT and November 3, 2024 02:00 CT                                                                                                    │
+     │                                                                                                                                                                                     │
+     │ R2. Cross-Midnight Session Math                                                                                                                                                     │
+     │ - Risk: Australia/Asia 17:00→02:00 CT day boundary logic fails                                                                                                                      │
+     │ - Mitigation: Explicit date rollover handling, test with fixed datetimes crossing midnight                                                                                          │
+     │ - Test: Session active check at 23:59 CT and 00:01 CT next day                                                                                                                      │
+     │                                                                                                                                                                                     │
+     │ R3. Backward Compatibility Break                                                                                                                                                    │
+     │ - Risk: Existing strategies without allowed_sessions suddenly blocked                                                                                                               │
+     │ - Mitigation: Default to ["24/7"] session if not specified, log warning                                                                                                             │
+     │ - Test: Load strategy with no allowed_sessions, verify trades execute                                                                                                               │
+     │                                                                                                                                                                                     │
+     │ R4. Time-Based Exit + Calendar Force-Close Collision                                                                                                                                │
+     │ - Risk: Both systems try to close same position simultaneously                                                                                                                      │
+     │ - Mitigation: Calendar check BEFORE time-based exit; single close order queued                                                                                                      │
+     │ - Test: Mock scenario where both trigger same minute                                                                                                                                │
+     │                                                                                                                                                                                     │
+     │ R5. Hardcoded Platform Times Become Stale                                                                                                                                           │
+     │ - Risk: TopStepX changes rules, our times don't update                                                                                                                              │
+     │ - Mitigation: Document platform config source, add validation checks, annual review reminder                                                                                        │
+     │ - Test: Validation mode checks platform times against TopStepX docs (manual)                                                                                                        │
+     │                                                                                                                                                                                     │
+     │ MEDIUM RISK - Monitor                                                                                                                                                               │
+     │                                                                                                                                                                                     │
+     │ R6. Backtest vs Live Time Source Divergence                                                                                                                                         │
+     │ - Risk: Backtest uses data timestamps; live uses system clock                                                                                                                       │
+     │ - Mitigation: Document clearly, add logging when session checks occur                                                                                                               │
+     │ - Test: Compare backtest and live logs for identical strategy                                                                                                                       │
+     │                                                                                                                                                                                     │
+     │ R7. Calendar Blocking Performance Impact                                                                                                                                            │
+     │ - Risk: get_status() call adds latency to every strategy iteration                                                                                                                  │
+     │ - Mitigation: Profile first; optimize only if >10ms impact measured                                                                                                                 │
+     │ - Test: Benchmark 30 strategies with/without calendar checks                                                                                                                        │
+     │                                                                                                                                                                                     │
+     │ ---                                                                                                                                                                                 │
+     │ Part 3: Test-First Development Strategy                                                                                                                                             │
+     │                                                                                                                                                                                     │
+     │ Phase 0: Write All Tests FIRST (Before Any Implementation)                                                                                                                          │
+     │                                                                                                                                                                                     │
+     │ File: tests/test_trading_calendar_sessions.py (NEW)                                                                                                                                 │
+     │                                                                                                                                                                                     │
+     │ # All tests use FIXED datetimes - no dependence on system clock                                                                                                                     │
+     │ # All times internally in Central Time, converted to MT for display only                                                                                                            │
+     │                                                                                                                                                                                     │
+     │ def test_cross_midnight_session_australia_active():                                                                                                                                 │
+     │     """Australia session 17:00 CT → 02:00 CT crosses midnight"""                                                                                                                    │
+     │     # Test: 23:59 CT on Jan 15 - should be ACTIVE                                                                                                                                   │
+     │     # Test: 00:01 CT on Jan 16 - should be ACTIVE                                                                                                                                   │
+     │     # Test: 02:01 CT on Jan 16 - should be INACTIVE                                                                                                                                 │
+     │                                                                                                                                                                                     │
+     │ def test_weekend_blackout_enforcement():                                                                                                                                            │
+     │     """Friday 14:00 CT close → Sunday 16:00 CT open"""                                                                                                                              │
+     │     # Test: Friday 13:59 CT - ALLOW trading                                                                                                                                         │
+     │     # Test: Friday 14:01 CT - BLOCK trading                                                                                                                                         │
+     │     # Test: Saturday 12:00 CT - BLOCK trading                                                                                                                                       │
+     │     # Test: Sunday 15:59 CT - BLOCK trading                                                                                                                                         │
+     │     # Test: Sunday 16:01 CT - ALLOW trading                                                                                                                                         │
+     │                                                                                                                                                                                     │
+     │ def test_platform_maintenance_overrides_session():                                                                                                                                  │
+     │     """Platform maintenance blocks even if session active"""                                                                                                                        │
+     │     # Test: NY session active but platform maintenance → BLOCK                                                                                                                      │
+     │                                                                                                                                                                                     │
+     │ def test_dst_transition_spring_forward():                                                                                                                                           │
+     │     """March 10, 2024 02:00 CT spring forward to 03:00 CT"""                                                                                                                        │
+     │     # Test: 01:59 CT - valid time                                                                                                                                                   │
+     │     # Test: 02:00 CT - DOES NOT EXIST (pytz should raise exception)                                                                                                                 │
+     │     # Test: 03:00 CT - valid time                                                                                                                                                   │
+     │                                                                                                                                                                                     │
+     │ def test_dst_transition_fall_back():                                                                                                                                                │
+     │     """November 3, 2024 02:00 CT fall back to 01:00 CT"""                                                                                                                           │
+     │     # Test: 01:59 CT first occurrence - valid                                                                                                                                       │
+     │     # Test: 01:59 CT second occurrence - valid but ambiguous                                                                                                                        │
+     │     # Use is_dst flag to distinguish                                                                                                                                                │
+     │                                                                                                                                                                                     │
+     │ def test_session_countdown_calculations():                                                                                                                                          │
+     │     """Verify countdown to next force-flat is accurate"""                                                                                                                           │
+     │     # Fixed: 10:00 CT → 14:00 CT force flat = 14,400 seconds                                                                                                                        │
+     │     # Never negative, clamped to 0 at deadline                                                                                                                                      │
+     │                                                                                                                                                                                     │
+     │ def test_utc_to_central_with_dst():                                                                                                                                                 │
+     │     """UTC timestamps convert correctly accounting for DST"""                                                                                                                       │
+     │     # Summer: UTC-5 (CDT)                                                                                                                                                           │
+     │     # Winter: UTC-6 (CST)                                                                                                                                                           │
+     │                                                                                                                                                                                     │
+     │ def test_strategy_without_allowed_sessions():                                                                                                                                       │
+     │     """Strategy missing allowed_sessions defaults to 24/7"""                                                                                                                        │
+     │     # Should NOT block trading, log warning                                                                                                                                         │
+     │                                                                                                                                                                                     │
+     │ def test_multiple_symbols_different_sessions():                                                                                                                                     │
+     │     """ES (NY only) and MGC (multi-session) enforce correctly"""                                                                                                                    │
+     │     # ES: block outside NY hours                                                                                                                                                    │
+     │     # MGC: allow Australia/Asia/London/NY hours                                                                                                                                     │
+     │                                                                                                                                                                                     │
+     │ def test_calendar_creation_failure_aborts():                                                                                                                                        │
+     │     """If calendar fails to create, startup aborts"""                                                                                                                               │
+     │     # Mock pytz failure, verify SystemExit raised                                                                                                                                   │
+     │                                                                                                                                                                                     │
+     │ Integration into Validate Mode:                                                                                                                                                     │
+     │ - Modify custom_portfolio/strategies/run_portfolio.py:validate_only()                                                                                                               │
+     │ - Add: pytest tests/test_trading_calendar_sessions.py before strategy loading                                                                                                       │
+     │ - FAIL validation if any test fails                                                                                                                                                 │
+     │ - Display test results in terminal formatter                                                                                                                                        │
+     │                                                                                                                                                                                     │
+     │ ---                                                                                                                                                                                 │
+     │ Part 4: Phase-by-Phase Implementation                                                                                                                                               │
+     │                                                                                                                                                                                     │
+     │ Phase 1: Define Session Times in Central Time                                                                                                                                       │
+     │                                                                                                                                                                                     │
+     │ File: custom_portfolio/strategies/portfolio_manager.py                                                                                                                              │
+     │                                                                                                                                                                                     │
+     │ Location: After line 53 (after SESSION_ABBREVIATIONS)                                                                                                                               │
+     │                                                                                                                                                                                     │
+     │ # ============================================================================                                                                                                      │
+     │ # TRADING SESSIONS - Central Time (America/Chicago)                                                                                                                                 │
+     │ # Source: CME Group market hours, TopStepX trading rules                                                                                                                            │
+     │ # Last Updated: 2025-01-23                                                                                                                                                          │
+     │ # Review Annually: Check TopStepX help.topstep.com for rule changes                                                                                                                 │
+     │ # ============================================================================                                                                                                      │
+     │                                                                                                                                                                                     │
+     │ TRADING_SESSIONS = {                                                                                                                                                                │
+     │     "24/7": {                                                                                                                                                                       │
+     │         "start": "00:00",                                                                                                                                                           │
+     │         "stop_new_orders": "23:59",                                                                                                                                                 │
+     │         "force_flat": "23:59",                                                                                                                                                      │
+     │         "description": "Always open; platform maintenance only (CME continuous markets)"                                                                                            │
+     │     },                                                                                                                                                                              │
+     │     "Australia": {                                                                                                                                                                  │
+     │         "start": "17:00",          # 5:00 PM CT (Sydney open)                                                                                                                       │
+     │         "stop_new_orders": "01:30", # 1:30 AM CT next day                                                                                                                           │
+     │         "force_flat": "02:00",      # 2:00 AM CT next day                                                                                                                           │
+     │         "description": "Australia/Sydney session (crosses midnight CT)"                                                                                                             │
+     │     },                                                                                                                                                                              │
+     │     "Asia": {                                                                                                                                                                       │
+     │         "start": "17:00",          # 5:00 PM CT (Tokyo/HK/Singapore open)                                                                                                           │
+     │         "stop_new_orders": "01:30", # 1:30 AM CT next day                                                                                                                           │
+     │         "force_flat": "02:00",      # 2:00 AM CT next day                                                                                                                           │
+     │         "description": "Asian session (Tokyo, Hong Kong, Singapore)"                                                                                                                │
+     │     },                                                                                                                                                                              │
+     │     "London": {                                                                                                                                                                     │
+     │         "start": "02:00",          # 2:00 AM CT (London open)                                                                                                                       │
+     │         "stop_new_orders": "08:30", # 8:30 AM CT                                                                                                                                    │
+     │         "force_flat": "09:00",      # 9:00 AM CT                                                                                                                                    │
+     │         "description": "London/European session"                                                                                                                                    │
+     │     },                                                                                                                                                                              │
+     │     "New_York": {                                                                                                                                                                   │
+     │         "start": "07:30",          # 7:30 AM CT (CME RTH open)                                                                                                                      │
+     │         "stop_new_orders": "13:30", # 1:30 PM CT (30-min buffer before close)                                                                                                       │
+     │         "force_flat": "14:00",      # 2:00 PM CT (CME RTH close)                                                                                                                    │
+     │         "description": "CME/NYMEX Regular Trading Hours (NY session)"                                                                                                               │
+     │     }                                                                                                                                                                               │
+     │ }                                                                                                                                                                                   │
+     │                                                                                                                                                                                     │
+     │ # ============================================================================                                                                                                      │
+     │ # TOPSTEP PLATFORM RULES - Central Time (America/Chicago)                                                                                                                           │
+     │ # Source: https://help.topstep.com/en/articles/8284206                                                                                                                              │
+     │ # TopStepX follows CME market hours with buffers for order processing                                                                                                               │
+     │ # ============================================================================                                                                                                      │
+     │                                                                                                                                                                                     │
+     │ TOPSTEPX_PLATFORM_CONFIG = {                                                                                                                                                        │
+     │     # Daily Maintenance Window                                                                                                                                                      │
+     │     "daily_stop_new_orders": "13:30",  # 1:30 PM CT (30-min buffer)                                                                                                                 │
+     │     "daily_force_flat": "14:00",       # 2:00 PM CT (CME equity index close)                                                                                                        │
+     │     "daily_resume": "16:00",           # 4:00 PM CT (CME evening session open)                                                                                                      │
+     │                                                                                                                                                                                     │
+     │     # Weekend Hours                                                                                                                                                                 │
+     │     "weekend_close": {                                                                                                                                                              │
+     │         "day": 4,                      # Friday (weekday() returns 4)                                                                                                               │
+     │         "time": "14:00"                # 2:00 PM CT Friday                                                                                                                          │
+     │     },                                                                                                                                                                              │
+     │     "weekend_open": {                                                                                                                                                               │
+     │         "day": 6,                      # Sunday (weekday() returns 6)                                                                                                               │
+     │         "time": "16:00"                # 4:00 PM CT Sunday                                                                                                                          │
+     │     }                                                                                                                                                                               │
+     │ }                                                                                                                                                                                   │
+     │                                                                                                                                                                                     │
+     │ # DST Note: All times above are in CT (CST/CDT). Python's pytz handles DST                                                                                                          │
+     │ # transitions automatically. When displaying to users, convert to Mountain Time.                                                                                                    │
+     │                                                                                                                                                                                     │
+     │ Export: Add to module-level (no all needed, direct import)                                                                                                                          │
+     │                                                                                                                                                                                     │
+     │ ---                                                                                                                                                                                 │
+     │ Phase 2: Create Timezone Conversion Utilities                                                                                                                                       │
+     │                                                                                                                                                                                     │
+     │ File: custom_portfolio/tools/timezone_utils.py (NEW)                                                                                                                                │
+     │                                                                                                                                                                                     │
+     │ """                                                                                                                                                                                 │
+     │ Timezone conversion utilities for trading calendar.                                                                                                                                 │
+     │                                                                                                                                                                                     │
+     │ ARCHITECTURE:                                                                                                                                                                       │
+     │ - Internal: All calculations in Central Time (America/Chicago)                                                                                                                      │
+     │ - Display: All user-facing output in Mountain Time (America/Denver)                                                                                                                 │
+     │ - Conversions: Explicit at boundaries only, never in business logic                                                                                                                 │
+     │ """                                                                                                                                                                                 │
+     │                                                                                                                                                                                     │
+     │ import pytz                                                                                                                                                                         │
+     │ from datetime import datetime                                                                                                                                                       │
+     │ from typing import Optional                                                                                                                                                         │
+     │                                                                                                                                                                                     │
+     │ CENTRAL_TZ = pytz.timezone("America/Chicago")                                                                                                                                       │
+     │ MOUNTAIN_TZ = pytz.timezone("America/Denver")                                                                                                                                       │
+     │                                                                                                                                                                                     │
+     │ def now_central() -> datetime:                                                                                                                                                      │
+     │     """Get current time in Central Time (timezone-aware)."""                                                                                                                        │
+     │     return datetime.now(CENTRAL_TZ)                                                                                                                                                 │
+     │                                                                                                                                                                                     │
+     │ def utc_to_central(utc_dt: datetime) -> datetime:                                                                                                                                   │
+     │     """                                                                                                                                                                             │
+     │     Convert UTC datetime to Central Time.                                                                                                                                           │
+     │                                                                                                                                                                                     │
+     │     CRITICAL: Handles DST transitions correctly.                                                                                                                                    │
+     │     - Summer (CDT): UTC-5                                                                                                                                                           │
+     │     - Winter (CST): UTC-6                                                                                                                                                           │
+     │                                                                                                                                                                                     │
+     │     Args:                                                                                                                                                                           │
+     │         utc_dt: Timezone-aware UTC datetime                                                                                                                                         │
+     │                                                                                                                                                                                     │
+     │     Returns:                                                                                                                                                                        │
+     │         Timezone-aware Central Time datetime                                                                                                                                        │
+     │                                                                                                                                                                                     │
+     │     Raises:                                                                                                                                                                         │
+     │         ValueError: If utc_dt is naive (missing timezone)                                                                                                                           │
+     │         pytz.AmbiguousTimeError: During DST fall-back (1 AM occurs twice)                                                                                                           │
+     │         pytz.NonExistentTimeError: During DST spring-forward (2 AM doesn't exist)                                                                                                   │
+     │     """                                                                                                                                                                             │
+     │     if utc_dt.tzinfo is None:                                                                                                                                                       │
+     │         raise ValueError("utc_dt must be timezone-aware (use datetime.now(pytz.UTC))")                                                                                              │
+     │                                                                                                                                                                                     │
+     │     return utc_dt.astimezone(CENTRAL_TZ)                                                                                                                                            │
+     │                                                                                                                                                                                     │
+     │ def central_to_mountain_display(central_dt: datetime) -> str:                                                                                                                       │
+     │     """                                                                                                                                                                             │
+     │     Convert Central Time to Mountain Time for user display.                                                                                                                         │
+     │                                                                                                                                                                                     │
+     │     Safe: CT and MT follow same DST schedule, always 1-hour offset.                                                                                                                 │
+     │                                                                                                                                                                                     │
+     │     Args:                                                                                                                                                                           │
+     │         central_dt: Timezone-aware Central Time datetime                                                                                                                            │
+     │                                                                                                                                                                                     │
+     │     Returns:                                                                                                                                                                        │
+     │         Formatted string "YYYY-MM-DD HH:MM:SS MT"                                                                                                                                   │
+     │     """                                                                                                                                                                             │
+     │     if central_dt.tzinfo is None:                                                                                                                                                   │
+     │         raise ValueError("central_dt must be timezone-aware")                                                                                                                       │
+     │                                                                                                                                                                                     │
+     │     mt_dt = central_dt.astimezone(MOUNTAIN_TZ)                                                                                                                                      │
+     │     return mt_dt.strftime("%Y-%m-%d %H:%M:%S MT")                                                                                                                                   │
+     │                                                                                                                                                                                     │
+     │ def parse_time_string_central(time_str: str, date: datetime) -> datetime:                                                                                                           │
+     │     """                                                                                                                                                                             │
+     │     Parse HH:MM time string as Central Time on given date.                                                                                                                          │
+     │                                                                                                                                                                                     │
+     │     Example: "14:05" on 2024-01-15 → 2024-01-15 14:05:00 CT                                                                                                                         │
+     │                                                                                                                                                                                     │
+     │     Args:                                                                                                                                                                           │
+     │         time_str: Time in "HH:MM" format                                                                                                                                            │
+     │         date: Date to apply time to (timezone-aware)                                                                                                                                │
+     │                                                                                                                                                                                     │
+     │     Returns:                                                                                                                                                                        │
+     │         Timezone-aware Central Time datetime                                                                                                                                        │
+     │     """                                                                                                                                                                             │
+     │     hour, minute = map(int, time_str.split(":"))                                                                                                                                    │
+     │     naive_dt = date.replace(hour=hour, minute=minute, second=0, microsecond=0, tzinfo=None)                                                                                         │
+     │                                                                                                                                                                                     │
+     │     # Use localize() with is_dst=None to raise exception on ambiguous times                                                                                                         │
+     │     try:                                                                                                                                                                            │
+     │         return CENTRAL_TZ.localize(naive_dt, is_dst=None)                                                                                                                           │
+     │     except pytz.AmbiguousTimeError:                                                                                                                                                 │
+     │         # During DST fall-back, 1:30 AM occurs twice                                                                                                                                │
+     │         # Default to first occurrence (DST still active)                                                                                                                            │
+     │         return CENTRAL_TZ.localize(naive_dt, is_dst=True)                                                                                                                           │
+     │     except pytz.NonExistentTimeError:                                                                                                                                               │
+     │         # During DST spring-forward, 2:00-3:00 AM doesn't exist                                                                                                                     │
+     │         # This should never happen with our session times, but handle gracefully                                                                                                    │
+     │         raise ValueError(f"Time {time_str} does not exist on {date.date()} due to DST spring-forward")                                                                              │
+     │                                                                                                                                                                                     │
+     │ Tests: Add to tests/test_trading_calendar_sessions.py (Phase 0 tests)                                                                                                               │
+     │                                                                                                                                                                                     │
+     │ ---                                                                                                                                                                                 │
+     │ Phase 3: Implement create_calendar() with Central Time                                                                                                                              │
+     │                                                                                                                                                                                     │
+     │ File: custom_portfolio/strategies/run_portfolio.py                                                                                                                                  │
+     │                                                                                                                                                                                     │
+     │ Replace: Lines 529-540 (current stub)                                                                                                                                               │
+     │                                                                                                                                                                                     │
+     │ def create_calendar():                                                                                                                                                              │
+     │     """                                                                                                                                                                             │
+     │     Create trading calendar with Central Time as source of truth.                                                                                                                   │
+     │                                                                                                                                                                                     │
+     │     All session times defined in CT (America/Chicago) internally.                                                                                                                   │
+     │     User-facing display will convert to MT (America/Denver).                                                                                                                        │
+     │                                                                                                                                                                                     │
+     │     Returns:                                                                                                                                                                        │
+     │         TradingCalendar instance configured for TopStepX, or None if creation fails                                                                                                 │
+     │                                                                                                                                                                                     │
+     │     Raises:                                                                                                                                                                         │
+     │         SystemExit: In live mode if calendar creation fails (safety-critical)                                                                                                       │
+     │     """                                                                                                                                                                             │
+     │     from custom_portfolio.tools.terminal_formatter import TerminalFormatter as TF                                                                                                   │
+     │                                                                                                                                                                                     │
+     │     try:                                                                                                                                                                            │
+     │         # Import dependencies                                                                                                                                                       │
+     │         from lumibot.tools.trading_calendar import TradingCalendar                                                                                                                  │
+     │         from custom_portfolio.strategies.portfolio_manager import (                                                                                                                 │
+     │             TRADING_SESSIONS,                                                                                                                                                       │
+     │             TOPSTEPX_PLATFORM_CONFIG                                                                                                                                                │
+     │         )                                                                                                                                                                           │
+     │         from custom_portfolio.tools.timezone_utils import CENTRAL_TZ                                                                                                                │
+     │                                                                                                                                                                                     │
+     │         # Create calendar with Central Time                                                                                                                                         │
+     │         calendar = TradingCalendar(                                                                                                                                                 │
+     │             timezone=CENTRAL_TZ,                                                                                                                                                    │
+     │             platform_config=TOPSTEPX_PLATFORM_CONFIG                                                                                                                                │
+     │         )                                                                                                                                                                           │
+     │                                                                                                                                                                                     │
+     │         # Register all trading sessions                                                                                                                                             │
+     │         calendar.register_sessions(TRADING_SESSIONS)                                                                                                                                │
+     │                                                                                                                                                                                     │
+     │         print(TF.success("Trading calendar created successfully (Central Time)"))                                                                                                   │
+     │         print(TF.metadata(f"  Sessions: {', '.join(TRADING_SESSIONS.keys())}"))                                                                                                     │
+     │         print(TF.metadata(f"  Platform: TopStepX (daily flat: {TOPSTEPX_PLATFORM_CONFIG['daily_force_flat']} CT)"))                                                                 │
+     │                                                                                                                                                                                     │
+     │         return calendar                                                                                                                                                             │
+     │                                                                                                                                                                                     │
+     │     except ImportError as e:                                                                                                                                                        │
+     │         error_msg = f"Failed to import calendar dependencies: {e}"                                                                                                                  │
+     │         print(TF.error(error_msg))                                                                                                                                                  │
+     │                                                                                                                                                                                     │
+     │         # Check if we're in live mode (IS_BACKTESTING=False)                                                                                                                        │
+     │         try:                                                                                                                                                                        │
+     │             from lumibot.credentials import IS_BACKTESTING                                                                                                                          │
+     │             if not IS_BACKTESTING:                                                                                                                                                  │
+     │                 print(TF.error("CRITICAL: Cannot start live trading without calendar (safety requirement)"))                                                                        │
+     │                 print(TF.error("Emergency override: Set CALENDAR_EMERGENCY_DISABLE=true in .env (NOT RECOMMENDED)"))                                                                │
+     │                 sys.exit(1)                                                                                                                                                         │
+     │         except:                                                                                                                                                                     │
+     │             pass                                                                                                                                                                    │
+     │                                                                                                                                                                                     │
+     │         return None                                                                                                                                                                 │
+     │                                                                                                                                                                                     │
+     │     except Exception as e:                                                                                                                                                          │
+     │         error_msg = f"Failed to create trading calendar: {e}"                                                                                                                       │
+     │         print(TF.error(error_msg))                                                                                                                                                  │
+     │         import traceback                                                                                                                                                            │
+     │         print(traceback.format_exc())                                                                                                                                               │
+     │                                                                                                                                                                                     │
+     │         # Hard fail in live mode                                                                                                                                                    │
+     │         try:                                                                                                                                                                        │
+     │             from lumibot.credentials import IS_BACKTESTING                                                                                                                          │
+     │             if not IS_BACKTESTING:                                                                                                                                                  │
+     │                 print(TF.error("CRITICAL: Calendar creation failed during live trading startup"))                                                                                   │
+     │                 sys.exit(1)                                                                                                                                                         │
+     │         except:                                                                                                                                                                     │
+     │             pass                                                                                                                                                                    │
+     │                                                                                                                                                                                     │
+     │         return None                                                                                                                                                                 │
+     │                                                                                                                                                                                     │
+     │ ---                                                                                                                                                                                 │
+     │ Phase 4: Wire Calendar into Backtest Mode                                                                                                                                           │
+     │                                                                                                                                                                                     │
+     │ File: custom_portfolio/strategies/run_portfolio.py                                                                                                                                  │
+     │                                                                                                                                                                                     │
+     │ Modify: PortfolioStrategy.initialize() method (around line 589)                                                                                                                     │
+     │                                                                                                                                                                                     │
+     │ Changes:                                                                                                                                                                            │
+     │ 1. Call create_calendar() and store result                                                                                                                                          │
+     │ 2. Read ENFORCE_SESSIONS_IN_BACKTEST env var (default TRUE)                                                                                                                         │
+     │ 3. Pass calendar and ignore_calendar flag to PortfolioManager                                                                                                                       │
+     │                                                                                                                                                                                     │
+     │ def initialize(self):                                                                                                                                                               │
+     │     """Initialize the portfolio manager."""                                                                                                                                         │
+     │     PortfolioStrategy._base_capital = shared_initial_capital                                                                                                                        │
+     │                                                                                                                                                                                     │
+     │     # ... existing code ...                                                                                                                                                         │
+     │                                                                                                                                                                                     │
+     │     # Create trading calendar (Central Time internally)                                                                                                                             │
+     │     trading_calendar = create_calendar()                                                                                                                                            │
+     │                                                                                                                                                                                     │
+     │     if trading_calendar is None:                                                                                                                                                    │
+     │         print("[WARNING] Trading calendar not available; sessions will not be enforced")                                                                                            │
+     │                                                                                                                                                                                     │
+     │     # Check if session enforcement should be enabled in backtest                                                                                                                    │
+     │     enforce_sessions = os.environ.get("ENFORCE_SESSIONS_IN_BACKTEST", "true").lower() == "true"                                                                                     │
+     │                                                                                                                                                                                     │
+     │     # For backtests: respect env var setting                                                                                                                                        │
+     │     # For live: always enforce (ignore_calendar=False)                                                                                                                              │
+     │     ignore_calendar_flag = not enforce_sessions  # True if we want to skip enforcement                                                                                              │
+     │                                                                                                                                                                                     │
+     │     if not enforce_sessions:                                                                                                                                                        │
+     │         print("[INFO] Session enforcement DISABLED for backtest (ENFORCE_SESSIONS_IN_BACKTEST=false)")                                                                              │
+     │     else:                                                                                                                                                                           │
+     │         print("[INFO] Session enforcement ENABLED for backtest (realistic mode)")                                                                                                   │
+     │                                                                                                                                                                                     │
+     │     self.portfolio_manager = PortfolioManager(                                                                                                                                      │
+     │         strategies_folder="custom_portfolio/strategies/active_strategies",                                                                                                          │
+     │         broker=self.broker,                                                                                                                                                         │
+     │         calendar=trading_calendar,  # ← Pass calendar here                                                                                                                          │
+     │         data_source=self.portfolio_data_source,                                                                                                                                     │
+     │         auto_load=True,                                                                                                                                                             │
+     │         cache_ttl_seconds=3600,                                                                                                                                                     │
+     │         min_order_delay_seconds=0.0,                                                                                                                                                │
+     │         default_atr_period=20,                                                                                                                                                      │
+     │         enable_snapshots=enable_snapshots,                                                                                                                                          │
+     │         max_snapshots=max_snapshots,                                                                                                                                                │
+     │         timestep=timestep,                                                                                                                                                          │
+     │         simulate_fills=simulate_fills,                                                                                                                                              │
+     │         shared_initial_capital=shared_initial_capital,                                                                                                                              │
+     │         broker_strategy_name=getattr(self, "name", "PortfolioStrategy"),                                                                                                            │
+     │         deep_portfolio_debug=deep_portfolio_debug,                                                                                                                                  │
+     │         ignore_calendar=ignore_calendar_flag,  # ← Pass enforcement flag                                                                                                            │
+     │     )                                                                                                                                                                               │
+     │                                                                                                                                                                                     │
+     │     # ... rest of initialize ...                                                                                                                                                    │
+     │                                                                                                                                                                                     │
+     │ ---                                                                                                                                                                                 │
+     │ Phase 5: Wire Calendar into Live Mode                                                                                                                                               │
+     │                                                                                                                                                                                     │
+     │ File: custom_portfolio/strategies/run_portfolio.py                                                                                                                                  │
+     │                                                                                                                                                                                     │
+     │ Modify: run_live() function (around line 907)                                                                                                                                       │
+     │                                                                                                                                                                                     │
+     │ def run_live(args):                                                                                                                                                                 │
+     │     """Run the portfolio in live trading mode."""                                                                                                                                   │
+     │     print("=" * 70)                                                                                                                                                                 │
+     │     print("RUNNING PORTFOLIO LIVE TRADING")                                                                                                                                         │
+     │     print("=" * 70)                                                                                                                                                                 │
+     │     print("⚠️  LIVE TRADING MODE - REAL ORDERS WILL BE PLACED")                                                                                                                     │
+     │     print("")                                                                                                                                                                       │
+     │                                                                                                                                                                                     │
+     │     # ... existing confirmation prompt ...                                                                                                                                          │
+     │                                                                                                                                                                                     │
+     │     # Create broker and data source                                                                                                                                                 │
+     │     broker = create_broker_for_live()                                                                                                                                               │
+     │     if broker is None:                                                                                                                                                              │
+     │         print("❌ Broker not configured. Cannot run live trading.")                                                                                                                 │
+     │         return                                                                                                                                                                      │
+     │                                                                                                                                                                                     │
+     │     data_source = broker.data_source                                                                                                                                                │
+     │     if data_source is None:                                                                                                                                                         │
+     │         print("❌ Data source not available from broker.")                                                                                                                          │
+     │         return                                                                                                                                                                      │
+     │                                                                                                                                                                                     │
+     │     # Create trading calendar (REQUIRED for live trading)                                                                                                                           │
+     │     calendar = create_calendar()                                                                                                                                                    │
+     │     if calendar is None:                                                                                                                                                            │
+     │         # Check for emergency override                                                                                                                                              │
+     │         emergency_disable = os.environ.get("CALENDAR_EMERGENCY_DISABLE", "false").lower() == "true"                                                                                 │
+     │         if emergency_disable:                                                                                                                                                       │
+     │             print("⚠️  WARNING: Calendar disabled via CALENDAR_EMERGENCY_DISABLE")                                                                                                  │
+     │             print("⚠️  WARNING: Trading WITHOUT session enforcement (NOT RECOMMENDED)")                                                                                             │
+     │             calendar = None                                                                                                                                                         │
+     │         else:                                                                                                                                                                       │
+     │             print("❌ CRITICAL: Cannot start live trading without calendar")                                                                                                        │
+     │             print("❌ Session enforcement is required to comply with TopStepX rules")                                                                                               │
+     │             return                                                                                                                                                                  │
+     │                                                                                                                                                                                     │
+     │     # Create portfolio manager (always enforce sessions in live mode)                                                                                                               │
+     │     portfolio_manager = PortfolioManager(                                                                                                                                           │
+     │         strategies_folder="custom_portfolio/strategies/active_strategies",                                                                                                          │
+     │         broker=broker,                                                                                                                                                              │
+     │         calendar=calendar,                                                                                                                                                          │
+     │         data_source=data_source,                                                                                                                                                    │
+     │         auto_load=True,                                                                                                                                                             │
+     │         cache_ttl_seconds=60,                                                                                                                                                       │
+     │         min_order_delay_seconds=2.0,                                                                                                                                                │
+     │         default_atr_period=20,                                                                                                                                                      │
+     │         enable_snapshots=enable_snapshots,                                                                                                                                          │
+     │         max_snapshots=max_snapshots,                                                                                                                                                │
+     │         timestep=timestep,                                                                                                                                                          │
+     │         simulate_fills=simulate_fills,                                                                                                                                              │
+     │         shared_initial_capital=shared_initial_capital,                                                                                                                              │
+     │         deep_portfolio_debug=deep_portfolio_debug,                                                                                                                                  │
+     │         ignore_calendar=False,  # ← ALWAYS enforce in live mode                                                                                                                     │
+     │     )                                                                                                                                                                               │
+     │                                                                                                                                                                                     │
+     │     # ... rest of run_live ...                                                                                                                                                      │
+     │                                                                                                                                                                                     │
+     │ ---                                                                                                                                                                                 │
+     │ Phase 6: Update Environment Configuration                                                                                                                                           │
+     │                                                                                                                                                                                     │
+     │ File: env.example                                                                                                                                                                   │
+     │                                                                                                                                                                                     │
+     │ Add (after line 28):                                                                                                                                                                │
+     │                                                                                                                                                                                     │
+     │ # ============================================================================                                                                                                      │
+     │ # Trading Calendar & Session Enforcement                                                                                                                                            │
+     │ # ============================================================================                                                                                                      │
+     │                                                                                                                                                                                     │
+     │ # Enforce trading sessions in backtests (default: true for realistic results)                                                                                                       │
+     │ # Set to false for signal exploration without session restrictions                                                                                                                  │
+     │ # WARNING: false will show inflated backtest performance vs. live trading                                                                                                           │
+     │ ENFORCE_SESSIONS_IN_BACKTEST=true                                                                                                                                                   │
+     │                                                                                                                                                                                     │
+     │ # Emergency calendar disable (LIVE TRADING ONLY - USE WITH EXTREME CAUTION)                                                                                                         │
+     │ # Only use if calendar system has critical bug and you need to trade immediately                                                                                                    │
+     │ # WARNING: Trading without calendar may violate TopStepX rules and risk account                                                                                                     │
+     │ CALENDAR_EMERGENCY_DISABLE=false                                                                                                                                                    │
+     │                                                                                                                                                                                     │
+     │ ---                                                                                                                                                                                 │
+     │ Phase 7: Update Strategy Template Documentation                                                                                                                                     │
+     │                                                                                                                                                                                     │
+     │ File: custom_portfolio/strategies/templates/strategy_template.py                                                                                                                    │
+     │                                                                                                                                                                                     │
+     │ Update: Lines 1-8 (docstring)                                                                                                                                                       │
+     │                                                                                                                                                                                     │
+     │ """                                                                                                                                                                                 │
+     │ Strategy template for `custom_portfolio/strategies/active_strategies/`.                                                                                                             │
+     │                                                                                                                                                                                     │
+     │ Symbols: see `custom_portfolio/data/futures_metadata.py` (FUTURES_METADATA keys).                                                                                                   │
+     │                                                                                                                                                                                     │
+     │ Sessions: see `custom_portfolio/strategies/portfolio_manager.py`:                                                                                                                   │
+     │   - TRADING_SESSIONS: Session time windows (in Central Time internally)                                                                                                             │
+     │   - SESSION_ABBREVIATIONS: Display abbreviations for logs/reports                                                                                                                   │
+     │   - Omit allowed_sessions for 24/7 trading (subject to platform maintenance only)                                                                                                   │
+     │                                                                                                                                                                                     │
+     │ strategy_id: leave blank to auto-use filename (sanitized), or set explicitly; must be unique.                                                                                       │
+     │                                                                                                                                                                                     │
+     │ Direction: label only (`long` | `short` | `both`); does not affect logic.                                                                                                           │
+     │                                                                                                                                                                                     │
+     │ Brackets: always on; TP/SL distances use ATR * pt_mult/sl_mult.                                                                                                                     │
+     │ """                                                                                                                                                                                 │
+     │                                                                                                                                                                                     │
+     │ ---                                                                                                                                                                                 │
+     │ Part 5: Testing Strategy                                                                                                                                                            │
+     │                                                                                                                                                                                     │
+     │ Pre-Implementation Tests (Phase 0 - WRITE FIRST)                                                                                                                                    │
+     │                                                                                                                                                                                     │
+     │ Status: Must pass BEFORE any code changes                                                                                                                                           │
+     │ Location: tests/test_trading_calendar_sessions.py                                                                                                                                   │
+     │ Run Command: pytest tests/test_trading_calendar_sessions.py -v                                                                                                                      │
+     │                                                                                                                                                                                     │
+     │ All 10+ tests defined in Phase 0 above.                                                                                                                                             │
+     │                                                                                                                                                                                     │
+     │ Integration into Validate Mode                                                                                                                                                      │
+     │                                                                                                                                                                                     │
+     │ Modify: custom_portfolio/strategies/run_portfolio.py:validate_only()                                                                                                                │
+     │                                                                                                                                                                                     │
+     │ def validate_only(args):                                                                                                                                                            │
+     │     """Validate strategies without running them."""                                                                                                                                 │
+     │     from custom_portfolio.tools.terminal_formatter import TerminalFormatter as TF                                                                                                   │
+     │                                                                                                                                                                                     │
+     │     print(TF.section_header("Running Calendar Unit Tests"))                                                                                                                         │
+     │                                                                                                                                                                                     │
+     │     # Run calendar tests first                                                                                                                                                      │
+     │     import subprocess                                                                                                                                                               │
+     │     result = subprocess.run(                                                                                                                                                        │
+     │         ["pytest", "tests/test_trading_calendar_sessions.py", "-v", "--tb=short"],                                                                                                  │
+     │         capture_output=True,                                                                                                                                                        │
+     │         text=True                                                                                                                                                                   │
+     │     )                                                                                                                                                                               │
+     │                                                                                                                                                                                     │
+     │     print(result.stdout)                                                                                                                                                            │
+     │                                                                                                                                                                                     │
+     │     if result.returncode != 0:                                                                                                                                                      │
+     │         print(TF.error("Calendar unit tests FAILED - cannot proceed with validation"))                                                                                              │
+     │         print(result.stderr)                                                                                                                                                        │
+     │         sys.exit(1)                                                                                                                                                                 │
+     │                                                                                                                                                                                     │
+     │     print(TF.success("Calendar unit tests PASSED"))                                                                                                                                 │
+     │     print("")                                                                                                                                                                       │
+     │                                                                                                                                                                                     │
+     │     # ... rest of existing validation code ...                                                                                                                                      │
+     │                                                                                                                                                                                     │
+     │ Post-Implementation Validation                                                                                                                                                      │
+     │                                                                                                                                                                                     │
+     │ Test 1: Backtest with enforcement OFF                                                                                                                                               │
+     │ # Set env var                                                                                                                                                                       │
+     │ export ENFORCE_SESSIONS_IN_BACKTEST=false                                                                                                                                           │
+     │                                                                                                                                                                                     │
+     │ # Run short backtest                                                                                                                                                                │
+     │ python custom_portfolio/strategies/run_portfolio.py --mode backtest                                                                                                                 │
+     │                                                                                                                                                                                     │
+     │ # Expected: Trades occur at ALL times (no session gating)                                                                                                                           │
+     │                                                                                                                                                                                     │
+     │ Test 2: Backtest with enforcement ON                                                                                                                                                │
+     │ # Set env var                                                                                                                                                                       │
+     │ export ENFORCE_SESSIONS_IN_BACKTEST=true                                                                                                                                            │
+     │                                                                                                                                                                                     │
+     │ # Run same backtest                                                                                                                                                                 │
+     │ python custom_portfolio/strategies/run_portfolio.py --mode backtest                                                                                                                 │
+     │                                                                                                                                                                                     │
+     │ # Expected:                                                                                                                                                                         │
+     │ # - Fewer trades (only during allowed sessions)                                                                                                                                     │
+     │ # - No trades during maintenance window (14:00-16:00 CT)                                                                                                                            │
+     │ # - No trades during weekend (Fri 14:00 - Sun 16:00 CT)                                                                                                                             │
+     │ # - Logs show "session restrictions" messages                                                                                                                                       │
+     │                                                                                                                                                                                     │
+     │ Test 3: Manual time verification                                                                                                                                                    │
+     │ # Check that session times match TopStepX documentation                                                                                                                             │
+     │ # URL: https://help.topstep.com/en/articles/8284206                                                                                                                                 │
+     │ # Verify CME market hours align with our TRADING_SESSIONS                                                                                                                           │
+     │                                                                                                                                                                                     │
+     │ ---                                                                                                                                                                                 │
+     │ Part 6: Rollback Procedures                                                                                                                                                         │
+     │                                                                                                                                                                                     │
+     │ Level 1: Disable Session Enforcement (Non-Destructive)                                                                                                                              │
+     │                                                                                                                                                                                     │
+     │ # In .env file                                                                                                                                                                      │
+     │ ENFORCE_SESSIONS_IN_BACKTEST=false                                                                                                                                                  │
+     │                                                                                                                                                                                     │
+     │ # For live trading emergency (NOT RECOMMENDED)                                                                                                                                      │
+     │ CALENDAR_EMERGENCY_DISABLE=true                                                                                                                                                     │
+     │                                                                                                                                                                                     │
+     │ Impact: System continues running, sessions not enforced                                                                                                                             │
+     │ Risk: May violate TopStepX rules in live trading                                                                                                                                    │
+     │                                                                                                                                                                                     │
+     │ Level 2: Revert create_calendar() to Stub                                                                                                                                           │
+     │                                                                                                                                                                                     │
+     │ File: custom_portfolio/strategies/run_portfolio.py                                                                                                                                  │
+     │                                                                                                                                                                                     │
+     │ def create_calendar():                                                                                                                                                              │
+     │     """Create a trading calendar instance."""                                                                                                                                       │
+     │     # Emergency: Disable calendar system                                                                                                                                            │
+     │     return None                                                                                                                                                                     │
+     │                                                                                                                                                                                     │
+     │ Impact: All calendar logic bypassed                                                                                                                                                 │
+     │ Risk: Same as Level 1                                                                                                                                                               │
+     │                                                                                                                                                                                     │
+     │ Level 3: Git Revert (Full Rollback)                                                                                                                                                 │
+     │                                                                                                                                                                                     │
+     │ # Identify commit before calendar integration                                                                                                                                       │
+     │ git log --oneline -10                                                                                                                                                               │
+     │                                                                                                                                                                                     │
+     │ # Revert to previous commit                                                                                                                                                         │
+     │ git revert <commit-hash>                                                                                                                                                            │
+     │                                                                                                                                                                                     │
+     │ # Or hard reset (DESTRUCTIVE)                                                                                                                                                       │
+     │ git reset --hard <commit-hash>                                                                                                                                                      │
+     │                                                                                                                                                                                     │
+     │ Impact: Complete removal of calendar system                                                                                                                                         │
+     │ Risk: Lose all work                                                                                                                                                                 │
+     │                                                                                                                                                                                     │
+     │ ---                                                                                                                                                                                 │
+     │ Part 7: Success Criteria Checklist                                                                                                                                                  │
+     │                                                                                                                                                                                     │
+     │ - All Phase 0 unit tests pass (10+ tests)                                                                                                                                           │
+     │ - Calendar unit tests integrated into --mode validate                                                                                                                               │
+     │ - ENFORCE_SESSIONS_IN_BACKTEST=true backtest shows fewer trades than false                                                                                                          │
+     │ - No trades occur during maintenance window (14:00-16:00 CT) when enforced                                                                                                          │
+     │ - No trades during weekend blackout (Fri 14:00 - Sun 16:00 CT) when enforced                                                                                                        │
+     │ - Cross-midnight sessions work (Australia 17:00→02:00 CT)                                                                                                                           │
+     │ - DST transition tests pass (March/November specific dates)                                                                                                                         │
+     │ - Strategy without allowed_sessions defaults to 24/7 with warning                                                                                                                   │
+     │ - Calendar creation failure in live mode aborts startup                                                                                                                             │
+     │ - Emergency disable flag CALENDAR_EMERGENCY_DISABLE works                                                                                                                           │
+     │ - All times displayed to user in Mountain Time (converted from Central)                                                                                                             │
+     │ - Documentation updated (template, env.example)                                                                                                                                     │
+     │ - Rollback procedures tested and documented                                                                                                                                         │
+     │                                                                                                                                                                                     │
+     │ ---                                                                                                                                                                                 │
+     │ Part 8: Timeline Estimates                                                                                                                                                          │
+     │                                                                                                                                                                                     │
+     │ | Phase      | Task                                        | Estimated Time |                                                                                                       │
+     │ |------------|---------------------------------------------|----------------|                                                                                                       │
+     │ | 0          | Write all unit tests                        | 2 hours        |                                                                                                       │
+     │ | 1          | Define session times (portfolio_manager.py) | 30 minutes     |                                                                                                       │
+     │ | 2          | Create timezone utilities                   | 1 hour         |                                                                                                       │
+     │ | 3          | Implement create_calendar()                 | 45 minutes     |                                                                                                       │
+     │ | 4          | Wire calendar into backtest mode            | 30 minutes     |                                                                                                       │
+     │ | 5          | Wire calendar into live mode                | 30 minutes     |                                                                                                       │
+     │ | 6          | Update environment config                   | 15 minutes     |                                                                                                       │
+     │ | 7          | Update documentation                        | 30 minutes     |                                                                                                       │
+     │ | Testing    | Run all tests, validate both modes          | 2 hours        |                                                                                                       │
+     │ | Validation | Manual verification against TopStepX docs   | 1 hour         |                                                                                                       │
+     │ | Total      | End-to-end implementation                   | ~9 hours       |                                                                                                       │
+     │                                                                                                                                                                                     │
+     │ Contingency: +3 hours for unexpected issues (DST edge cases, timezone bugs)                                                                                                         │
+     │                                                                                                                                                                                     │
+     │ ---                                                                                                                                                                                 │
+     │ Part 9: Risk Mitigation Summary                                                                                                                                                     │
+     │                                                                                                                                                                                     │
+     │ | Risk                         | Probability | Impact   | Mitigation                                                  |                                                             │
+     │ |------------------------------|-------------|----------|-------------------------------------------------------------|                                                             │
+     │ | DST conversion error         | Medium      | High     | Comprehensive DST tests, pytz.localize with is_dst checks   |                                                             │
+     │ | Cross-midnight math failure  | Medium      | High     | Fixed datetime tests at 23:59/00:01, explicit date rollover |                                                             │
+     │ | Backward compatibility break | Low         | High     | Default to 24/7 if allowed_sessions missing                 |                                                             │
+     │ | Hardcoded times become stale | Medium      | Medium   | Document source, annual review reminder                     |                                                             │
+     │ | Calendar blocks all trading  | Low         | Critical | Hard fail on creation error, emergency disable flag         |                                                             │
+     │ | Backtest vs live divergence  | Medium      | Medium   | Document time source differences, log extensively           |                                                             │
+     │ | Weekend transition bug       | Low         | High     | Specific Friday/Saturday/Sunday tests                       |                                                             │
+     │ | Platform time changes        | Low         | High     | Source documented, validation against TopStepX docs         |                                                             │
+     │                                                                                                                                                                                     │
+     │ ---                                                                                                                                                                                 │
+     │ Implementation Notes                                                                                                                                                                │
+     │                                                                                                                                                                                     │
+     │ Why This Plan Will Succeed:                                                                                                                                                         │
+     │ 1. Uses existing battle-tested code (TradingCalendar, session definitions)                                                                                                          │
+     │ 2. Test-driven approach catches bugs early                                                                                                                                          │
+     │ 3. Simple architecture (no overengineering)                                                                                                                                         │
+     │ 4. Clear timezone strategy (CT internal, MT display)                                                                                                                                │
+     │ 5. Multiple safety layers (hard fail, emergency disable, rollback)                                                                                                                  │
+     │ 6. Comprehensive test coverage (DST, midnight, weekends)                                                                                                                            │
+     │                                                                                                                                                                                     │
+     │ CEO Approval Checklist:                                                                                                                                                             │
+     │ - ✅ Timezone strategy clear and documented (CT source of truth)                                                                                                                    │
+     │ - ✅ Risk analysis complete with mitigation plans                                                                                                                                   │
+     │ - ✅ Test-first development approach                                                                                                                                                │
+     │ - ✅ Hard fail on critical errors (live trading safety)                                                                                                                             │
+     │ - ✅ Rollback procedures defined                                                                                                                                                    │
+     │ - ✅ Timeline realistic (~9 hours + contingency)                                                                                                                                    │
+     │ - ✅ Success criteria measurable and specific                                                                                                                                       │
+     │                                                                                                                                                                                     │
+     │ Ready to Execute: All planning complete. Implementation can proceed with confidence.

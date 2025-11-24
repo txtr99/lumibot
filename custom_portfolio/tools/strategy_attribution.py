@@ -57,6 +57,7 @@ class StrategyAttribution:
         self.strategy_metrics: Dict[str, dict] = {}
         self.snapshots = deque(maxlen=safe_max)
         self.max_snapshots = safe_max
+        self.equity_curve = deque(maxlen=safe_max)
         self.logger = logging.getLogger(__name__)
 
     def register_strategy(self, strategy_id: str, initial_capital: float = 0.0) -> None:
@@ -105,6 +106,25 @@ class StrategyAttribution:
             return pd.DataFrame()
         return pd.DataFrame(list(self.snapshots))
 
+    def record_equity_curve(self, timestamp: datetime, account_balance: float, portfolio_value: float) -> None:
+        """
+        Record equity curve data point for a specific timestamp.
+
+        Args:
+            timestamp: Current timestamp
+            account_balance: Realized P&L only (initial capital + realized gains/losses)
+            portfolio_value: Total portfolio value including unrealized P&L
+        """
+        self.equity_curve.append(
+            {"timestamp": timestamp, "account_balance": account_balance, "portfolio_value": portfolio_value}
+        )
+
+    def get_equity_curve_df(self) -> pd.DataFrame:
+        """Return equity curve as a DataFrame (empty if none)."""
+        if not self.equity_curve:
+            return pd.DataFrame()
+        return pd.DataFrame(list(self.equity_curve))
+
     def record_trade(
         self,
         strategy_id: str,
@@ -140,6 +160,7 @@ class StrategyAttribution:
         if multiplier is None:
             try:
                 from custom_portfolio.data.futures_metadata import get_multiplier
+
                 multiplier = get_multiplier(symbol) if symbol else 1.0
             except Exception:
                 multiplier = 1.0
