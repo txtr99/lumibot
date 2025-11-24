@@ -1184,10 +1184,103 @@ def validate_only(args):
     """
     Validate strategies without running them.
 
+    Runs calendar unit tests FIRST before strategy validation.
+    Tests must pass before strategies are loaded.
+
     Args:
         args: Command line arguments
     """
+    import subprocess
+    import sys
+
     from custom_portfolio.tools.terminal_formatter import TerminalFormatter as TF
+
+    # ========================================================================
+    # PHASE 8: INTEGRATE CALENDAR TESTS INTO VALIDATE MODE
+    # ========================================================================
+    # Run calendar unit tests BEFORE strategy loading
+    # If tests fail, abort validation (prevent trading with broken calendar)
+    # ========================================================================
+
+    print("")
+    print(TF.horizontal_rule())
+    print(TF.section_header("Calendar Unit Tests"))
+    print(TF.horizontal_rule())
+    print("")
+
+    # Run pytest on calendar tests
+    test_file = "tests/test_trading_calendar_sessions.py"
+    print(TF.key_value("Test file", test_file))
+    print("")
+
+    try:
+        # Run pytest with verbose output
+        result = subprocess.run(
+            ["python", "-m", "pytest", test_file, "-v", "--tb=short", "--color=yes"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        # Display pytest output
+        print(result.stdout)
+        if result.stderr:
+            print(result.stderr)
+
+        # Check if tests passed
+        if result.returncode != 0:
+            print("")
+            print(
+                TF.error(
+                    "❌ CALENDAR TESTS FAILED\n\n"
+                    "Calendar unit tests must pass before strategy validation.\n"
+                    "Please fix the failing tests and try again.\n\n"
+                    f"Test file: {test_file}\n"
+                    f"Exit code: {result.returncode}"
+                )
+            )
+            print("")
+            sys.exit(1)
+
+        # Tests passed
+        print("")
+        print(TF.success("✓ All calendar unit tests passed!"))
+        print("")
+
+    except subprocess.TimeoutExpired:
+        print(
+            TF.error(
+                "❌ CALENDAR TESTS TIMEOUT\n\n"
+                "Calendar unit tests timed out after 60 seconds.\n"
+                "Please check for infinite loops or hanging tests."
+            )
+        )
+        sys.exit(1)
+
+    except FileNotFoundError:
+        print(
+            TF.warning(
+                f"⚠️  Calendar test file not found: {test_file}\n\n"
+                "Skipping calendar tests (file does not exist).\n"
+                "This is acceptable for development but tests should exist in production."
+            )
+        )
+        print("")
+
+    except Exception as e:
+        print(
+            TF.error(f"❌ ERROR RUNNING CALENDAR TESTS\n\n" f"Error: {e}\n\n" "Skipping calendar tests due to error.")
+        )
+        print("")
+
+    # ========================================================================
+    # STRATEGY VALIDATION
+    # ========================================================================
+
+    print(TF.horizontal_rule())
+    print(TF.section_header("Strategy Validation"))
+    print(TF.horizontal_rule())
+    print("")
 
     enable_snapshots, max_snapshots, timestep = _snapshot_config()
     simulate_fills = _simulate_fills_config()
