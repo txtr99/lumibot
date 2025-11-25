@@ -61,3 +61,7 @@ user_data/
 *.log
 snapshots/
 *.png
+
+# Metadata verification timestamp (machine-specific)
+.metadata_last_verified
+tools/api_responses/

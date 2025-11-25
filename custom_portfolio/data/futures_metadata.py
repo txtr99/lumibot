@@ -14,6 +14,48 @@ Author: LumiBot Multi-Strategy Team
 Date: 2025-11-18
 """
 
+# ==================== GLOBEX SYMBOL MAPPING ====================
+# CME Globex uses different symbols than common trading symbols.
+# Contract ID format: CON.F.US.<GLOBEX_SYMBOL>.<EXPIRY>
+# Example: CON.F.US.EP.Z25 (ES December 2025)
+#
+# This mapping is STATIC - Globex symbols never change, only expiry rolls.
+
+# Globex symbol -> Trading symbol (for parsing contract IDs)
+# Discovered via ProjectX API contract_search - these are STATIC mappings
+GLOBEX_TO_SYMBOL = {
+    # Equity Index
+    "EP": "ES",  # E-mini S&P 500
+    "ENQ": "NQ",  # E-mini Nasdaq 100
+    # Energy
+    "CLE": "CL",  # Crude Light
+    "MCLE": "MCL",  # Micro Crude
+    "NGE": "NG",  # Natural Gas
+    "NQG": "QG",  # E-Mini Natural Gas
+    "NQM": "QM",  # E-Mini Crude Oil
+    # Metals
+    "GCE": "GC",  # Gold
+    "SIE": "SI",  # Silver
+    # Currencies
+    "EU6": "6E",  # Euro FX
+    "JY6": "6J",  # Japanese Yen
+    "MX6": "6M",  # Mexican Peso
+    # Treasuries
+    "FVA": "ZF",  # 5 Year Treasury
+    "TYA": "ZN",  # 10 Year Treasury
+    "USA": "ZB",  # 30 Year Treasury
+    # Agriculture
+    "ZCE": "ZC",  # Corn
+    "ZSE": "ZS",  # Soybeans
+    "ZWA": "ZW",  # Wheat
+    # These match directly (no mapping needed):
+    # MES, MNQ, MGC, MNG, MYM, RTY, SIL, YM, M6E
+}
+
+# Trading symbol -> Globex symbol (for building contract IDs)
+SYMBOL_TO_GLOBEX = {v: k for k, v in GLOBEX_TO_SYMBOL.items()}
+
+
 # ==================== FUTURES METADATA ====================
 
 FUTURES_METADATA = {
@@ -70,7 +112,7 @@ FUTURES_METADATA = {
         "name": "E-mini Dow",
         "description": "E-mini Dow Jones Industrial Average Futures",
         "tick_size": 1.0,
-        "tick_value": 5.00,
+        "tick_value": 0.5,
         "trading_fee": 0.85,
         "exchange": "CBOT",
         "currency": "USD",
@@ -155,7 +197,7 @@ FUTURES_METADATA = {
         "name": "Micro Silver",
         "description": "Micro Silver Futures",
         "tick_size": 0.005,
-        "tick_value": 2.50,
+        "tick_value": 25.0,
         "trading_fee": 0.53,
         "exchange": "COMEX",
         "currency": "USD",
@@ -192,7 +234,7 @@ FUTURES_METADATA = {
         "name": "Natural Gas",
         "description": "Natural Gas Futures",
         "tick_size": 0.001,
-        "tick_value": 10.00,
+        "tick_value": 1.0,
         "trading_fee": 0.85,
         "exchange": "NYMEX",
         "currency": "USD",
@@ -204,7 +246,7 @@ FUTURES_METADATA = {
         "name": "Micro Natural Gas",
         "description": "Micro Natural Gas Futures",
         "tick_size": 0.005,
-        "tick_value": 1.25,
+        "tick_value": 12.5,
         "trading_fee": 0.53,
         "exchange": "NYMEX",
         "currency": "USD",
@@ -252,8 +294,8 @@ FUTURES_METADATA = {
     "ZT": {
         "name": "2-Year T-Note",
         "description": "2-Year U.S. Treasury Note Futures",
-        "tick_size": 1 / 128,
-        "tick_value": 15.625,
+        "tick_size": 0.00390625,
+        "tick_value": 7.8125,
         "trading_fee": 0.85,
         "exchange": "CBOT",
         "currency": "USD",
@@ -301,8 +343,8 @@ FUTURES_METADATA = {
     "6A": {
         "name": "Australian Dollar",
         "description": "Australian Dollar Futures",
-        "tick_size": 0.0001,
-        "tick_value": 10.00,
+        "tick_size": 5e-05,
+        "tick_value": 5.0,
         "trading_fee": 0.85,
         "exchange": "CME",
         "currency": "USD",
@@ -325,8 +367,8 @@ FUTURES_METADATA = {
     "6S": {
         "name": "Swiss Franc",
         "description": "Swiss Franc Futures",
-        "tick_size": 0.0001,
-        "tick_value": 12.50,
+        "tick_size": 5e-05,
+        "tick_value": 6.25,
         "trading_fee": 0.85,
         "exchange": "CME",
         "currency": "USD",
@@ -334,10 +376,406 @@ FUTURES_METADATA = {
         "hours": "Nearly 24 hours",
         "category": "currency",
     },
+    "NKD": {
+        "name": "Nikkei 225 (Globex)",
+        "description": "Nikkei 225 (Globex): December 2025",
+        "tick_size": 5.0,
+        "tick_value": 25.0,
+        "trading_fee": 4.34,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "equity_index",
+        "topstep_round_turn_fee": 4.34,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "MBT": {
+        "name": "Micro Bitcoin",
+        "description": "Micro Bitcoin: November 2025",
+        "tick_size": 5.0,
+        "tick_value": 0.5,
+        "trading_fee": 2.34,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "crypto",
+        "topstep_round_turn_fee": 2.34,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "MET": {
+        "name": "Micro Ether",
+        "description": "Micro Ether: November 2025",
+        "tick_size": 0.5,
+        "tick_value": 0.05,
+        "trading_fee": 0.24,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "crypto",
+        "topstep_round_turn_fee": 0.24,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "QM": {
+        "name": "E-Mini Crude Oil",
+        "description": "E-Mini Crude Oil: January 2026",
+        "tick_size": 0.025,
+        "tick_value": 12.5,
+        "trading_fee": 2.44,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "energy",
+        "topstep_round_turn_fee": 2.44,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "PL": {
+        "name": "Platinum (Globex)",
+        "description": "Platinum (Globex): January 2026",
+        "tick_size": 0.1,
+        "tick_value": 5.0,
+        "trading_fee": 3.24,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "metals",
+        "topstep_round_turn_fee": 3.24,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "RB": {
+        "name": "NY Harbor ULSD",
+        "description": "NY Harbor ULSD: January 2026",
+        "tick_size": 0.0001,
+        "tick_value": 4.2,
+        "trading_fee": 3.04,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "energy",
+        "topstep_round_turn_fee": 3.04,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "HO": {
+        "name": "Lean Hogs (Globex)",
+        "description": "Lean Hogs (Globex): February 2026",
+        "tick_size": 0.025,
+        "tick_value": 10.0,
+        "trading_fee": 3.04,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "energy",
+        "topstep_round_turn_fee": 3.04,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "MNG": {
+        "name": "Micro Henry Hub Natural Gas",
+        "description": "Micro Henry Hub Natural Gas: January 2026",
+        "tick_size": 0.001,
+        "tick_value": 1.0,
+        "trading_fee": 1.24,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "energy",
+        "topstep_round_turn_fee": 1.24,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "M6A": {
+        "name": "E-Micro AUD/USD",
+        "description": "E-Micro AUD/USD: December 2025",
+        "tick_size": 0.0001,
+        "tick_value": 1.0,
+        "trading_fee": 0.52,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "currency",
+        "topstep_round_turn_fee": 0.52,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "M6E": {
+        "name": "E-Micro EUR/USD",
+        "description": "E-Micro EUR/USD: December 2025",
+        "tick_size": 0.0001,
+        "tick_value": 1.25,
+        "trading_fee": 0.52,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "currency",
+        "topstep_round_turn_fee": 0.52,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "E7": {
+        "name": "E-mini Euro FX",
+        "description": "E-mini Euro FX: December 2025",
+        "tick_size": 0.0001,
+        "tick_value": 6.25,
+        "trading_fee": 1.74,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "currency",
+        "topstep_round_turn_fee": 1.74,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "6M": {
+        "name": "Mexican Peso (Globex)",
+        "description": "Mexican Peso (Globex): December 2025",
+        "tick_size": 1e-05,
+        "tick_value": 5.0,
+        "trading_fee": 3.24,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "currency",
+        "topstep_round_turn_fee": 3.24,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "6N": {
+        "name": "New Zealand Dollar (Globex)",
+        "description": "New Zealand Dollar (Globex): December 2025",
+        "tick_size": 5e-05,
+        "tick_value": 5.0,
+        "trading_fee": 3.24,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "currency",
+        "topstep_round_turn_fee": 3.24,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "M6B": {
+        "name": "E-Micro GBP/USD",
+        "description": "E-Micro GBP/USD: December 2025",
+        "tick_size": 0.0001,
+        "tick_value": 0.625,
+        "trading_fee": 0.52,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "currency",
+        "topstep_round_turn_fee": 0.52,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "UB": {
+        "name": "Micro Henry Hub Natural Gas",
+        "description": "Micro Henry Hub Natural Gas: January 2026",
+        "tick_size": 0.001,
+        "tick_value": 1.0,
+        "trading_fee": 1.94,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "treasury",
+        "topstep_round_turn_fee": 1.94,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "TN": {
+        "name": "Ultra 10yr Treasury Note (Globex)",
+        "description": "Ultra 10yr Treasury Note (Globex): December 2025",
+        "tick_size": 0.015625,
+        "tick_value": 15.625,
+        "trading_fee": 1.64,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "treasury",
+        "topstep_round_turn_fee": 1.64,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "HG": {
+        "name": "Copper (Globex)",
+        "description": "Copper (Globex): March 2026",
+        "tick_size": 0.0005,
+        "tick_value": 12.5,
+        "trading_fee": 3.24,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "metals",
+        "topstep_round_turn_fee": 3.24,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "MHG": {
+        "name": "Micro Copper",
+        "description": "Micro Copper: March 2026",
+        "tick_size": 0.0005,
+        "tick_value": 1.25,
+        "trading_fee": 1.24,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "metals",
+        "topstep_round_turn_fee": 1.24,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "HE": {
+        "name": "Micro Ether",
+        "description": "Micro Ether: November 2025",
+        "tick_size": 0.5,
+        "tick_value": 0.05,
+        "trading_fee": 4.24,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "agriculture",
+        "topstep_round_turn_fee": 4.24,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "LE": {
+        "name": "Crude Light (Globex)",
+        "description": "Crude Light (Globex): January 2026",
+        "tick_size": 0.01,
+        "tick_value": 10.0,
+        "trading_fee": 4.24,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "agriculture",
+        "topstep_round_turn_fee": 4.24,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "ZC": {
+        "name": "Corn (Globex)",
+        "description": "Corn (Globex): March 2026",
+        "tick_size": 0.25,
+        "tick_value": 12.5,
+        "trading_fee": 4.3,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "agriculture",
+        "topstep_round_turn_fee": 4.3,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "ZW": {
+        "name": "Wheat (Globex)",
+        "description": "Wheat (Globex): March 2026",
+        "tick_size": 0.25,
+        "tick_value": 12.5,
+        "trading_fee": 4.3,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "agriculture",
+        "topstep_round_turn_fee": 4.3,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "ZS": {
+        "name": "Soybeans (Globex)",
+        "description": "Soybeans (Globex): January 2026",
+        "tick_size": 0.25,
+        "tick_value": 12.5,
+        "trading_fee": 4.3,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "agriculture",
+        "topstep_round_turn_fee": 4.3,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "ZM": {
+        "name": "Soybean Meal (Globex)",
+        "description": "Soybean Meal (Globex): January 2026",
+        "tick_size": 0.1,
+        "tick_value": 10.0,
+        "trading_fee": 4.3,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "agriculture",
+        "topstep_round_turn_fee": 4.3,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
+    "ZL": {
+        "name": "Soybean Oil (Globex)",
+        "description": "Soybean Oil (Globex): January 2026",
+        "tick_size": 0.01,
+        "tick_value": 6.0,
+        "trading_fee": 4.3,
+        "exchange": "CME",
+        "currency": "USD",
+        "category": "agriculture",
+        "topstep_round_turn_fee": 4.3,
+        "last_verified": "2025-11-24",
+        "data_source": "projectx_api",
+    },
 }
 
 
 # ==================== HELPER FUNCTIONS ====================
+
+
+def globex_to_symbol(globex: str) -> str:
+    """
+    Convert Globex symbol to trading symbol.
+
+    Args:
+        globex: The Globex symbol from contract ID (e.g., 'EP', 'ENQ', 'GCE')
+
+    Returns:
+        The trading symbol (e.g., 'ES', 'NQ', 'GC').
+        Returns input unchanged if no mapping exists.
+
+    Examples:
+        >>> globex_to_symbol('EP')
+        'ES'
+        >>> globex_to_symbol('MES')
+        'MES'
+    """
+    return GLOBEX_TO_SYMBOL.get(globex, globex)
+
+
+def symbol_to_globex(symbol: str) -> str:
+    """
+    Convert trading symbol to Globex symbol.
+
+    Args:
+        symbol: The trading symbol (e.g., 'ES', 'NQ', 'GC')
+
+    Returns:
+        The Globex symbol for contract IDs (e.g., 'EP', 'ENQ', 'GCE').
+        Returns input unchanged if no mapping exists.
+
+    Examples:
+        >>> symbol_to_globex('ES')
+        'EP'
+        >>> symbol_to_globex('MES')
+        'MES'
+    """
+    return SYMBOL_TO_GLOBEX.get(symbol, symbol)
+
+
+def contract_id_to_symbol(contract_id: str) -> str:
+    """
+    Extract trading symbol from a full contract ID.
+
+    Args:
+        contract_id: Full contract ID (e.g., 'CON.F.US.EP.Z25')
+
+    Returns:
+        The trading symbol (e.g., 'ES').
+        Returns the raw Globex part if not in FUTURES_METADATA.
+
+    Examples:
+        >>> contract_id_to_symbol('CON.F.US.EP.Z25')
+        'ES'
+        >>> contract_id_to_symbol('CON.F.US.MES.Z25')
+        'MES'
+    """
+    parts = contract_id.split(".")
+    if len(parts) >= 4:
+        globex = parts[3]
+        symbol = globex_to_symbol(globex)
+        # Verify it's a known symbol
+        if symbol in FUTURES_METADATA:
+            return symbol
+        # Check if the globex symbol itself is in metadata
+        if globex in FUTURES_METADATA:
+            return globex
+    # Fallback: return the raw part
+    return parts[3] if len(parts) >= 4 else contract_id
 
 
 def get_tick_size(symbol: str) -> float:
@@ -460,6 +898,72 @@ MULTIPLIER_OVERRIDES = {
 }
 
 
+# TopStepX round-turn fees (NFA & clearing fees) as of May 2025
+# Source: TopStep fee schedule - values are round-turn (entry + exit)
+# Per-order fee = round_turn_fee / 2
+TOPSTEP_ROUND_TURN_FEES = {
+    # CME Equity Futures
+    "ES": 2.80,
+    "MES": 0.74,
+    "NQ": 2.80,
+    "MNQ": 0.74,
+    "RTY": 2.80,
+    "M2K": 0.74,
+    "NKD": 4.34,
+    "MBT": 2.34,
+    "MET": 0.24,
+    # CME CBOT Equity Futures
+    "YM": 2.80,
+    "MYM": 0.74,
+    # CME NYMEX Futures
+    "CL": 3.04,
+    "MCL": 1.04,
+    "QM": 2.44,
+    "PL": 3.24,
+    "QG": 1.04,
+    "RB": 3.04,
+    "HO": 3.04,
+    "NG": 3.20,
+    "MNG": 1.24,
+    # CME Foreign Exchange Futures
+    "6A": 3.24,
+    "M6A": 0.52,
+    "6B": 3.24,
+    "M6B": 0.52,
+    "6C": 3.24,
+    "6E": 3.24,
+    "M6E": 0.52,
+    "6J": 3.24,
+    "6S": 3.24,
+    "E7": 1.74,
+    "6M": 3.24,
+    "6N": 3.24,
+    # CME CBOT Financial/Interest Rate Futures
+    "ZT": 1.34,
+    "ZF": 1.34,
+    "ZN": 1.60,
+    "ZB": 1.78,
+    "UB": 1.94,
+    "TN": 1.64,
+    # CME COMEX Futures
+    "GC": 3.24,
+    "MGC": 1.24,
+    "SI": 3.24,
+    "SIL": 2.04,
+    "HG": 3.24,
+    "MHG": 1.24,
+    # CME Agricultural Futures
+    "HE": 4.24,
+    "LE": 4.24,
+    # CME CBOT Commodity Futures
+    "ZC": 4.30,
+    "ZW": 4.30,
+    "ZS": 4.30,
+    "ZM": 4.30,
+    "ZL": 4.30,
+}
+
+
 def get_multiplier(symbol: str) -> float:
     """
     Derive the contract multiplier using tick value / tick size when available.
@@ -553,7 +1057,82 @@ def round_to_tick(price: float, symbol: str) -> float:
         2023.1
     """
     tick_size = get_tick_size(symbol)
-    return round(price / tick_size) * tick_size
+    # Calculate decimal places needed from tick_size (e.g., 0.25 -> 2, 0.1 -> 1)
+    tick_str = f"{tick_size:.10f}".rstrip("0")
+    decimals = len(tick_str.split(".")[-1]) if "." in tick_str else 0
+    # Round to tick, then round again to eliminate floating point noise
+    result = round(price / tick_size) * tick_size
+    return round(result, decimals)
+
+
+# ==================== TOPSTEP FEE FUNCTIONS ====================
+
+
+def get_round_turn_fee(symbol: str) -> float | None:
+    """
+    Get the TopStepX round-turn fee for a symbol.
+
+    Args:
+        symbol: The futures symbol (e.g., 'ES', 'NQ', 'GC')
+
+    Returns:
+        Round-turn fee in USD, or None if symbol not found.
+
+    Examples:
+        >>> get_round_turn_fee('ES')
+        2.80
+        >>> get_round_turn_fee('MES')
+        0.74
+    """
+    if not symbol:
+        return None
+    return TOPSTEP_ROUND_TURN_FEES.get(symbol.upper())
+
+
+def get_per_order_fee(symbol: str) -> float | None:
+    """
+    Get the TopStepX per-order (per side) fee for a symbol.
+
+    This is half of the round-turn fee, rounded to 2 decimal places.
+
+    Args:
+        symbol: The futures symbol (e.g., 'ES', 'NQ', 'GC')
+
+    Returns:
+        Per-order fee in USD, or None if symbol not found.
+
+    Examples:
+        >>> get_per_order_fee('ES')
+        1.40
+        >>> get_per_order_fee('MES')
+        0.37
+    """
+    rt_fee = get_round_turn_fee(symbol)
+    if rt_fee is None:
+        return None
+    return round(rt_fee / 2.0, 2)
+
+
+def build_trading_fees(symbol: str):
+    """
+    Build lumibot TradingFee list for a symbol (flat per-order fee).
+
+    Returns empty list if symbol is unknown or TradingFee import fails.
+
+    Args:
+        symbol: The futures symbol (e.g., 'ES', 'NQ', 'GC')
+
+    Returns:
+        List containing a single TradingFee object, or empty list.
+    """
+    fee = get_per_order_fee(symbol)
+    if fee is None:
+        return []
+    try:
+        from lumibot.entities import TradingFee
+    except Exception:
+        return []
+    return [TradingFee(flat_fee=fee)]
 
 
 # ==================== VALIDATION ====================

@@ -5,10 +5,12 @@ Provides futures trading functionality through ProjectX broker integration.
 Supports multiple underlying brokers (TSX, TOPONE, etc.) via ProjectX gateway.
 """
 
+# PollingStream usage was removed to align with centralized lifecycle in core Broker
 from datetime import datetime, timedelta
 from typing import Dict, List
 
 import pandas as pd
+from termcolor import colored
 
 from lumibot.brokers.broker import Broker
 from lumibot.data_sources import DataSource
@@ -16,20 +18,16 @@ from lumibot.entities import Asset, Order, Position
 from lumibot.tools.lumibot_logger import get_logger
 from lumibot.tools.projectx_helpers import (
     ProjectXClient,
-    create_bracket_meta,
-    normalize_bracket_entry_tag,
+    build_bracket_child_spec,
     build_unique_order_tag,
-    select_effective_prices,
-    bracket_child_tag,
+    create_bracket_meta,
     derive_base_tag,
     early_store_bracket_meta,
+    normalize_bracket_entry_tag,
     restore_bracket_meta_if_needed,
+    select_effective_prices,
     should_spawn_bracket_children,
-    build_bracket_child_spec,
 )
-from termcolor import colored
-# PollingStream usage was removed to align with centralized lifecycle in core Broker
-import traceback
 
 # Import moved to avoid circular dependency
 # from lumibot.credentials import PROJECTX_CONFIG
@@ -40,20 +38,20 @@ logger = get_logger(__name__)
 class ProjectX(Broker):
     """
     ProjectX broker implementation for futures trading.
-    
+
     Supports multiple underlying brokers through ProjectX gateway.
     Base URLs are provided automatically for all supported firms.
-    
+
     Required Configuration:
     - PROJECTX_{FIRM}_API_KEY: API key for the broker
-    - PROJECTX_{FIRM}_USERNAME: Username for the broker  
+    - PROJECTX_{FIRM}_USERNAME: Username for the broker
     - PROJECTX_{FIRM}_PREFERRED_ACCOUNT_NAME: Account name for trading
-    
+
     Optional Configuration:
     - PROJECTX_FIRM: Explicitly specify firm (auto-detected if not set)
     - PROJECTX_{FIRM}_BASE_URL: Override default API URL
     - PROJECTX_{FIRM}_STREAMING_BASE_URL: Override default streaming URL
-    
+
     Supported firms: topstepx, topone, tickticktrader, alphaticks,
     aquafutures, blueguardianfutures, blusky, bulenox, e8x, fundingfutures,
     thefuturesdesk, futureselite, fxifyfutures, goatfundedfutures, holaprime,
@@ -62,43 +60,49 @@ class ProjectX(Broker):
 
     # Order type mappings (ProjectX values - CORRECTED from real Project X library)
     ORDER_TYPE_MAPPING = {
-        "limit": 1,       # Limit order
-        "market": 2,      # Market order
-        "stop": 4,        # Stop order
-        "trail": 5,       # Trailing stop order
-        "join_bid": 6,    # Join bid order
-        "join_ask": 7,    # Join ask order
+        "limit": 1,  # Limit order
+        "market": 2,  # Market order
+        "stop": 4,  # Stop order
+        "trail": 5,  # Trailing stop order
+        "join_bid": 6,  # Join bid order
+        "join_ask": 7,  # Join ask order
     }
 
     # Order side mappings (ProjectX values - CORRECTED from real Project X library)
     ORDER_SIDE_MAPPING = {
-        "buy": 0,   # Buy/Long
+        "buy": 0,  # Buy/Long
         "sell": 1,  # Sell/Short
     }
 
     # ProjectX order status to Lumibot status mapping (FIXED based on actual ProjectX API documentation)
     # Source: ProjectX API docs show OrderStatus enum: Open=1, Filled=2, Cancelled=3, Expired=4, Rejected=5, Pending=6
     ORDER_STATUS_MAPPING = {
-        1: "open",             # Open (active order on exchange)
-        2: "filled",           # Filled (completely executed)
-        3: "cancelled",        # Cancelled
-        4: "expired",          # Expired (map to cancelled for Lumibot)
-        5: "rejected",         # Rejected (will be aliased to "error")
-        6: "new",              # Pending (new order, not yet on exchange)
+        1: "open",  # Open (active order on exchange)
+        2: "filled",  # Filled (completely executed)
+        3: "cancelled",  # Cancelled
+        4: "expired",  # Expired (map to cancelled for Lumibot)
+        5: "rejected",  # Rejected (will be aliased to "error")
+        6: "new",  # Pending (new order, not yet on exchange)
         # Extended statuses that may exist in some ProjectX implementations:
-        7: "partially_filled", # Partially filled (if supported)
-        8: "replaced",         # Order replaced/modified
-        9: "pending_cancel",   # Cancel request pending
-        10: "pending_replace", # Replace request pending
-        11: "suspended",       # Order suspended
-        12: "triggered",       # Stop/conditional order triggered
+        7: "partially_filled",  # Partially filled (if supported)
+        8: "replaced",  # Order replaced/modified
+        9: "pending_cancel",  # Cancel request pending
+        10: "pending_replace",  # Replace request pending
+        11: "suspended",  # Order suspended
+        12: "triggered",  # Stop/conditional order triggered
     }
 
-    def __init__(self, config: dict = None, data_source: DataSource = None,
-                 connect_stream: bool = True, max_workers: int = 20, firm: str = None):
+    def __init__(
+        self,
+        config: dict = None,
+        data_source: DataSource = None,
+        connect_stream: bool = True,
+        max_workers: int = 20,
+        firm: str = None,
+    ):
         """
         Initialize ProjectX broker.
-        
+
         Args:
             config: Configuration dictionary (optional, auto-detected from environment)
             data_source: Data source for market data
@@ -109,6 +113,7 @@ class ProjectX(Broker):
         # Use environment config if not provided
         if config is None:
             from lumibot.credentials import get_projectx_config
+
             config = get_projectx_config(firm)
 
         # Validate required configuration
@@ -130,7 +135,7 @@ class ProjectX(Broker):
                 f"No preferred account name set for {firm_name}. "
                 f"Consider setting PROJECTX_{firm_name}_PREFERRED_ACCOUNT_NAME for better account selection."
             )
-			
+
         self.config = config
         self.firm = config.get("firm")
 
@@ -163,7 +168,7 @@ class ProjectX(Broker):
             name=f"ProjectX_{self.firm}",
             data_source=data_source,
             connect_stream=connect_stream,
-            max_workers=max_workers
+            max_workers=max_workers,
         )
 
         self.logger.debug(f"ProjectX broker initialized for {self.firm}")
@@ -240,9 +245,9 @@ class ProjectX(Broker):
 
     # --- Logging dedupe override ---
     def _on_new_order(self, order):  # override to suppress duplicates
-        if not hasattr(self, '_creation_log_ids'):
+        if not hasattr(self, "_creation_log_ids"):
             self._creation_log_ids = set()
-        oid = getattr(order, 'identifier', None) or getattr(order, 'id', None) or id(order)
+        oid = getattr(order, "identifier", None) or getattr(order, "id", None) or id(order)
         if oid not in self._creation_log_ids:
             self._creation_log_ids.add(oid)
             # replicate original log format
@@ -294,8 +299,7 @@ class ProjectX(Broker):
             self.logger.error(f"Error cancelling order {order.id}: {e}")
             return False
 
-    def _modify_order(self, order: Order, limit_price: float = None,
-                     stop_price: float = None) -> bool:
+    def _modify_order(self, order: Order, limit_price: float = None, stop_price: float = None) -> bool:
         """Modify an existing order."""
         try:
             if not order.id:
@@ -318,7 +322,7 @@ class ProjectX(Broker):
                 order_id=int(order.id),
                 size=order.quantity,
                 limit_price=limit_price,
-                stop_price=stop_price
+                stop_price=stop_price,
             )
 
             if response and response.get("success"):
@@ -351,8 +355,10 @@ class ProjectX(Broker):
                 return order
 
             # Log order submission details
-            self.logger.debug(f"Submitting order: {order.asset.symbol}, qty={order.quantity}, "
-                            f"side={order.side}, type={order.order_type}")
+            self.logger.debug(
+                f"Submitting order: {order.asset.symbol}, qty={order.quantity}, "
+                f"side={order.side}, type={order.order_type}"
+            )
 
             # Get contract tick size for price rounding
             tick_size = self.client.get_contract_tick_size(contract_id)
@@ -371,10 +377,9 @@ class ProjectX(Broker):
                 return order
 
             # Detect synthetic bracket parent (do NOT apply secondary prices to entry)
-            is_bracket_parent = (
-                getattr(order, 'order_class', None) == getattr(Order.OrderClass, 'BRACKET', None)
-                and not getattr(order, '_is_bracket_child', False)
-            )
+            is_bracket_parent = getattr(order, "order_class", None) == getattr(
+                Order.OrderClass, "BRACKET", None
+            ) and not getattr(order, "_is_bracket_child", False)
 
             if is_bracket_parent:
                 self.logger.debug(
@@ -383,20 +388,28 @@ class ProjectX(Broker):
                     f"sec_stop={getattr(order,'secondary_stop_price',None)} limit={getattr(order,'limit_price',None)} stop={getattr(order,'stop_price',None)}"
                 )
                 # Capture intended TP/SL from secondary_* without sending them in parent
-                tp_price = getattr(order, 'secondary_limit_price', None)
-                sl_price = getattr(order, 'secondary_stop_price', None)
+                tp_price = getattr(order, "secondary_limit_price", None)
+                sl_price = getattr(order, "secondary_stop_price", None)
                 # Use helper to build synthetic bracket metadata (pure, low-risk extraction)
                 order._synthetic_bracket = create_bracket_meta(tp_price, sl_price)
                 order._is_bracket_parent = True
                 # Early store meta with a temporary key (will update key once broker id returned)
                 # Early provisional meta store under temp key
-                temp_key = getattr(order, 'id', None) or f"temp_{id(order)}"
-                if not hasattr(self, '_bracket_meta'):
+                temp_key = getattr(order, "id", None) or f"temp_{id(order)}"
+                if not hasattr(self, "_bracket_meta"):
                     self._bracket_meta = {}
                 early_store_bracket_meta(self._bracket_meta, temp_key, order._synthetic_bracket, self.logger)
                 # Entry prices: only use primary limit/stop (rare) else None
-                limit_price = self.client.round_to_tick_size(order.limit_price, tick_size) if getattr(order, 'limit_price', None) is not None else None
-                stop_price = self.client.round_to_tick_size(order.stop_price, tick_size) if getattr(order, 'stop_price', None) is not None else None
+                limit_price = (
+                    self.client.round_to_tick_size(order.limit_price, tick_size)
+                    if getattr(order, "limit_price", None) is not None
+                    else None
+                )
+                stop_price = (
+                    self.client.round_to_tick_size(order.stop_price, tick_size)
+                    if getattr(order, "stop_price", None) is not None
+                    else None
+                )
             else:
                 # Use extracted pure helper for non-bracket price selection
                 limit_price, stop_price = select_effective_prices(order, self.client, tick_size)
@@ -406,9 +419,9 @@ class ProjectX(Broker):
             # Passing 'order_type' caused: unexpected keyword argument 'order_type'
             # Ensure we supply a UNIQUE custom tag (ProjectX requires uniqueness per account)
             # Unique tag generation via helper (mirrors prior logic)
-            previous_tag = getattr(order, 'tag', None)
+            previous_tag = getattr(order, "tag", None)
             build_unique_order_tag(order)
-            if previous_tag != getattr(order, 'tag', None):
+            if previous_tag != getattr(order, "tag", None):
                 self.logger.debug(f"Auto-assigned order tag {order.tag}")
 
             # Apply bracket parent tag normalization AFTER tag generation
@@ -417,8 +430,8 @@ class ProjectX(Broker):
                 normalized_tag, base_tag = normalize_bracket_entry_tag(order.tag)
                 if normalized_tag:
                     order.tag = normalized_tag
-                if base_tag and hasattr(order, '_synthetic_bracket'):
-                    order._synthetic_bracket['base_tag'] = base_tag
+                if base_tag and hasattr(order, "_synthetic_bracket"):
+                    order._synthetic_bracket["base_tag"] = base_tag
 
             response = self.client.order_place(
                 account_id=self.account_id,
@@ -428,29 +441,35 @@ class ProjectX(Broker):
                 size=order.quantity,
                 limit_price=limit_price,
                 stop_price=stop_price,
-                custom_tag=order.tag
+                custom_tag=order.tag,
             )
 
             # Log response details
-            self.logger.debug(f"Order response: success={response.get('success') if response else 'None'}, "
-                            f"orderId={response.get('orderId') if response else 'None'}")
-            
+            self.logger.debug(
+                f"Order response: success={response.get('success') if response else 'None'}, "
+                f"orderId={response.get('orderId') if response else 'None'}"
+            )
+
             if response and response.get("success"):
                 # Step 1: Update order with broker's ID (matching Alpaca/Tradier pattern)
                 order.id = str(response.get("orderId"))
                 order.identifier = order.id  # Critical: Update identifier BEFORE tracking
-                if is_bracket_parent and hasattr(order, '_synthetic_bracket'):
+                if is_bracket_parent and hasattr(order, "_synthetic_bracket"):
                     # If we previously stored under a temp key, migrate
                     try:
                         # Remove any temp_* entries that match tp/sl pair to prevent duplicate meta
                         for k in list(self._bracket_meta.keys()):
-                            if k.startswith('temp_'):
+                            if k.startswith("temp_"):
                                 temp_meta = self._bracket_meta.get(k)
-                                if temp_meta and temp_meta.get('tp_price') == order._synthetic_bracket.get('tp_price') and temp_meta.get('sl_price') == order._synthetic_bracket.get('sl_price'):
+                                if (
+                                    temp_meta
+                                    and temp_meta.get("tp_price") == order._synthetic_bracket.get("tp_price")
+                                    and temp_meta.get("sl_price") == order._synthetic_bracket.get("sl_price")
+                                ):
                                     self._bracket_meta.pop(k, None)
                     except Exception:
                         pass
-                    order._synthetic_bracket['parent_id'] = order.id
+                    order._synthetic_bracket["parent_id"] = order.id
                     # Persist meta map for conversions
                     try:
                         self._bracket_meta[order.id] = dict(order._synthetic_bracket)
@@ -460,34 +479,38 @@ class ProjectX(Broker):
                         )
                         # Ultra-fast fill race: fill events may have arrived before meta store; attempt spawn now if children not yet submitted.
                         try:
-                            if not order._synthetic_bracket.get('children_submitted'):
+                            if not order._synthetic_bracket.get("children_submitted"):
                                 # Ensure cache copy gets meta for subsequent events
                                 cached = self._orders_cache.get(order.id)
-                                if cached and not hasattr(cached, '_synthetic_bracket'):
+                                if cached and not hasattr(cached, "_synthetic_bracket"):
                                     cached._synthetic_bracket = order._synthetic_bracket
                                     cached._is_bracket_parent = True
-                                self.logger.debug(f"[BRACKET SPAWN IMMEDIATE] parent_id={order.id} status={order.status}")
+                                self.logger.debug(
+                                    f"[BRACKET SPAWN IMMEDIATE] parent_id={order.id} status={order.status}"
+                                )
                                 self._maybe_spawn_bracket_children(order)
                         except Exception as ie:
                             self.logger.error(f"[BRACKET SPAWN IMMEDIATE ERROR] parent_id={order.id} err={ie}")
                     except Exception:
                         pass
-                    self.logger.debug(f"[BRACKET DETECT CONFIRMED] parent_id={order.id} tp={order._synthetic_bracket.get('tp_price')} sl={order._synthetic_bracket.get('sl_price')}")
-                
+                    self.logger.debug(
+                        f"[BRACKET DETECT CONFIRMED] parent_id={order.id} tp={order._synthetic_bracket.get('tp_price')} sl={order._synthetic_bracket.get('sl_price')}"
+                    )
+
                 self.logger.debug(f"Order submitted: id={order.id}, status=submitted")
-                
+
                 # Step 2: Set initial status and prices
                 order.status = "submitted"
                 order.limit_price = limit_price
                 order.stop_price = stop_price
-                
+
                 # Step 3: Add to _unprocessed_orders FIRST (following gold standard pattern)
                 # This is CRITICAL - must happen before _process_trade_event
                 self._unprocessed_orders.append(order)
-                
+
                 # Step 4: Cache for quick lookups (optional optimization)
                 self._orders_cache[order.id] = order
-                
+
                 # Step 5: Process the NEW_ORDER event (moves from unprocessed to new)
                 try:
                     self._process_trade_event(order, self.NEW_ORDER)
@@ -527,10 +550,10 @@ class ProjectX(Broker):
 
     def _get_balances_at_broker(self, quote_asset: Asset, strategy) -> tuple:
         """Get account balances from the broker.
-        
+
         Returns:
             tuple: (cash_value, positions_value, total_liquidation_value)
-            
+
         Raises:
             Exception: If unable to retrieve balance data (instead of returning misleading 0.0 values)
         """
@@ -555,7 +578,9 @@ class ProjectX(Broker):
             positions_value = equity - cash_balance
             total_liquidation_value = equity
 
-            self.logger.debug(f"Account balance - Cash: ${cash_balance:.2f}, Positions Value: ${positions_value:.2f}, Total: ${total_liquidation_value:.2f}")
+            self.logger.debug(
+                f"Account balance - Cash: ${cash_balance:.2f}, Positions Value: ${positions_value:.2f}, Total: ${total_liquidation_value:.2f}"
+            )
 
             return (cash_balance, positions_value, total_liquidation_value)
 
@@ -580,9 +605,7 @@ class ProjectX(Broker):
             start_date = end_date - timedelta(days=30)
 
             orders_data = self.client.get_orders(
-                account_id=self.account_id,
-                start_date=start_date.isoformat(),
-                end_date=end_date.isoformat()
+                account_id=self.account_id, start_date=start_date.isoformat(), end_date=end_date.isoformat()
             )
 
             self.logger.debug(f"Retrieved {len(orders_data)} orders from broker")
@@ -600,10 +623,10 @@ class ProjectX(Broker):
                     if not isinstance(broker_order, dict):
                         self.logger.debug(f"Skipping non-dict order payload: {type(broker_order)}")
                         continue
-                    order_id = broker_order.get('id', 'unknown')
-                    status = broker_order.get('status', 'unknown')
-                    order_type = broker_order.get('type', 'unknown')
-                    contract_id = broker_order.get('contractId', 'unknown')
+                    order_id = broker_order.get("id", "unknown")
+                    status = broker_order.get("status", "unknown")
+                    order_type = broker_order.get("type", "unknown")
+                    contract_id = broker_order.get("contractId", "unknown")
 
                     # Minimal logging - only log issues, not every successful conversion
                     order = self._convert_broker_order_to_lumibot_order(broker_order)
@@ -616,9 +639,10 @@ class ProjectX(Broker):
 
                 except Exception as e:
                     # Guard against non-dict in error path
-                    order_id = broker_order.get('id', 'unknown') if isinstance(broker_order, dict) else 'unknown'
+                    order_id = broker_order.get("id", "unknown") if isinstance(broker_order, dict) else "unknown"
                     self.logger.error(f"❌ Failed to convert order {order_id}: {e}")
                     import traceback
+
                     self.logger.error(f"Full traceback: {traceback.format_exc()}")
                     continue
 
@@ -660,10 +684,16 @@ class ProjectX(Broker):
                         # Update cache
                         self._positions_cache[position.asset.symbol] = position
                     else:
-                        contract_id = broker_position.get('contractId', 'unknown') if isinstance(broker_position, dict) else 'unknown'
+                        contract_id = (
+                            broker_position.get("contractId", "unknown")
+                            if isinstance(broker_position, dict)
+                            else "unknown"
+                        )
                         self.logger.debug(f"Position {contract_id} conversion returned None")
                 except Exception as e:
-                    contract_id = broker_position.get('contractId', 'unknown') if isinstance(broker_position, dict) else 'unknown'
+                    contract_id = (
+                        broker_position.get("contractId", "unknown") if isinstance(broker_position, dict) else "unknown"
+                    )
                     self.logger.error(f"❌ Failed to convert position {contract_id}: {e}")
                     continue
 
@@ -687,7 +717,7 @@ class ProjectX(Broker):
     def get_chains(self, asset: Asset) -> Dict:
         """
         Get options chains for an asset.
-        
+
         ProjectX is a futures broker, so this method is not applicable.
         Raises NotImplementedError as futures don't have options chains.
         """
@@ -746,15 +776,15 @@ class ProjectX(Broker):
             # This helps catch recently placed orders and avoids missing them
             end_date = datetime.now() + timedelta(seconds=30)  # Look slightly ahead for clock skew
             start_date = datetime.now() - timedelta(minutes=5)  # Look back 5 minutes for recent orders
-            
-            self.logger.debug(f"Searching orders: account={self.account_id}, "
-                            f"start={start_date.isoformat()}, end={end_date.isoformat()}")
+
+            self.logger.debug(
+                f"Searching orders: account={self.account_id}, "
+                f"start={start_date.isoformat()}, end={end_date.isoformat()}"
+            )
 
             # Search for orders
             orders = self.client.order_search(
-                account_id=self.account_id,
-                start_datetime=start_date.isoformat(),
-                end_datetime=end_date.isoformat()
+                account_id=self.account_id, start_datetime=start_date.isoformat(), end_datetime=end_date.isoformat()
             )
 
             # Process order search results
@@ -765,63 +795,61 @@ class ProjectX(Broker):
             elif isinstance(orders, dict) and orders.get("success"):
                 order_list = orders.get("orders", [])
                 self.logger.debug(f"API returned {len(order_list)} orders")
-            
+
             # Also search for recent trades to catch filled market orders
             # Trades are the ground truth for fills according to the other AI
             try:
                 trades = self._search_recent_trades(start_date, end_date)
                 self.logger.debug(f"Found {len(trades)} recent trades")
-                
+
                 # For each trade, ensure we have the corresponding order
                 for trade in trades:
-                    order_id = str(trade.get('orderId'))
+                    order_id = str(trade.get("orderId"))
                     # Check if we already have this order
                     found = False
                     for order in order_list:
-                        if str(order.get('id')) == order_id:
+                        if str(order.get("id")) == order_id:
                             found = True
                             # Update order with fill info from trade
-                            if trade.get('price'):
-                                order['filledPrice'] = trade.get('price')
-                            if trade.get('size'):
-                                order['fillVolume'] = trade.get('size')
+                            if trade.get("price"):
+                                order["filledPrice"] = trade.get("price")
+                            if trade.get("size"):
+                                order["fillVolume"] = trade.get("size")
                             break
-                    
+
                     if not found:
                         # Create a synthetic order record from trade data
                         # This helps catch market orders that filled instantly
                         synthetic_order = {
-                            'id': order_id,
-                            'accountId': trade.get('accountId'),
-                            'contractId': trade.get('contractId'),
-                            'status': 2,  # Filled
-                            'fillVolume': trade.get('size'),
-                            'filledPrice': trade.get('price'),
-                            'side': trade.get('side'),
+                            "id": order_id,
+                            "accountId": trade.get("accountId"),
+                            "contractId": trade.get("contractId"),
+                            "status": 2,  # Filled
+                            "fillVolume": trade.get("size"),
+                            "filledPrice": trade.get("price"),
+                            "side": trade.get("side"),
                             # We don't know the original order type, assume market for instant fills
-                            'type': 2  # Market
+                            "type": 2,  # Market
                         }
                         order_list.append(synthetic_order)
                         self.logger.debug(f"Added synthetic order from trade: {order_id}")
             except Exception as trade_e:
                 self.logger.debug(f"Could not search trades: {trade_e}")
-            
+
             return order_list
 
         except Exception as e:
             self.logger.error(f"Error getting all orders: {e}")
             return []
-    
+
     def _search_recent_trades(self, start_date, end_date) -> List[dict]:
         """Search for recent trades to identify filled orders."""
         try:
             # Use the ProjectX trade search API
             response = self.client.api.trade_search(
-                account_id=self.account_id,
-                start_timestamp=start_date.isoformat(),
-                end_timestamp=end_date.isoformat()
+                account_id=self.account_id, start_timestamp=start_date.isoformat(), end_timestamp=end_date.isoformat()
             )
-            
+
             if response and response.get("success"):
                 trades = response.get("trades", [])
                 return trades
@@ -849,7 +877,7 @@ class ProjectX(Broker):
                             # Parse symbol like "MESU25" -> "CON.F.US.MES.U25"
                             if len(contract_symbol) >= 4:
                                 base_symbol = contract_symbol[:-3]  # Remove last 3 chars
-                                month_year = contract_symbol[-3:]   # Get month + year code
+                                month_year = contract_symbol[-3:]  # Get month + year code
                                 if len(month_year) == 3:
                                     month_code = month_year[0]
                                     year_code = month_year[1:]
@@ -865,7 +893,9 @@ class ProjectX(Broker):
                         return contract_id
 
                 except Exception as asset_error:
-                    self.logger.warning(f"⚠️ Asset class resolution failed, falling back to client method: {asset_error}")
+                    self.logger.warning(
+                        f"⚠️ Asset class resolution failed, falling back to client method: {asset_error}"
+                    )
 
             # For non-continuous futures or fallback, use client method
             contract_id = self.client.find_contract_by_symbol(symbol)
@@ -914,7 +944,7 @@ class ProjectX(Broker):
             # Get the broker's order ID
             broker_order_id = str(broker_order.get("id"))
             # If we have a cached order, reuse critical lifecycle info & prevent status downgrade
-            cached_order = self._orders_cache.get(broker_order_id) if hasattr(self, '_orders_cache') else None
+            cached_order = self._orders_cache.get(broker_order_id) if hasattr(self, "_orders_cache") else None
             if cached_order:
                 # Prevent status regression (e.g., filled -> new) from out-of-order stream messages
                 terminal_statuses = {"fill", "filled", "canceled", "cancelled", "error"}
@@ -930,7 +960,7 @@ class ProjectX(Broker):
                 quantity=broker_order.get("size", 0),
                 side=side,
                 order_type=order_type,  # Use order_type instead of deprecated 'type'
-                identifier=broker_order_id  # Set identifier to broker's ID right away
+                identifier=broker_order_id,  # Set identifier to broker's ID right away
             )
 
             # Set additional properties
@@ -949,51 +979,62 @@ class ProjectX(Broker):
 
             # If cached order exists, inherit strategy & any previously known fill data
             if cached_order:
-                if getattr(cached_order, 'strategy', None):
+                if getattr(cached_order, "strategy", None):
                     order.strategy = cached_order.strategy
                 # Propagate synthetic bracket metadata & flags
-                restore_bracket_meta_if_needed(order, {broker_order_id: cached_order} if cached_order else {}, getattr(self, '_bracket_meta', {}), self.logger)
-                if getattr(cached_order, '_is_bracket_parent', False):
+                restore_bracket_meta_if_needed(
+                    order,
+                    {broker_order_id: cached_order} if cached_order else {},
+                    getattr(self, "_bracket_meta", {}),
+                    self.logger,
+                )
+                if getattr(cached_order, "_is_bracket_parent", False):
                     order._is_bracket_parent = True
-                if getattr(cached_order, '_bracket_children_submitted', False):
+                if getattr(cached_order, "_bracket_children_submitted", False):
                     order._bracket_children_submitted = True
-                if getattr(cached_order, '_is_bracket_child', False):
+                if getattr(cached_order, "_is_bracket_child", False):
                     order._is_bracket_child = True
-                if hasattr(cached_order, '_bracket_parent_id') and not hasattr(order, '_bracket_parent_id'):
-                    order._bracket_parent_id = getattr(cached_order, '_bracket_parent_id')
+                if hasattr(cached_order, "_bracket_parent_id") and not hasattr(order, "_bracket_parent_id"):
+                    order._bracket_parent_id = cached_order._bracket_parent_id
                 # Fallback fill price if still missing
-                if not getattr(order, 'avg_fill_price', None) and getattr(cached_order, 'avg_fill_price', None):
+                if not getattr(order, "avg_fill_price", None) and getattr(cached_order, "avg_fill_price", None):
                     order.avg_fill_price = cached_order.avg_fill_price
                 # Fallback filled quantity
-                if (getattr(order, 'filled_quantity', None) in (None, 0)) and getattr(cached_order, 'filled_quantity', None):
+                if (getattr(order, "filled_quantity", None) in (None, 0)) and getattr(
+                    cached_order, "filled_quantity", None
+                ):
                     order.filled_quantity = cached_order.filled_quantity
                 # Preserve previously known fill info if new payload omits it
-                prev_avg = getattr(cached_order, 'avg_fill_price', None)
+                prev_avg = getattr(cached_order, "avg_fill_price", None)
                 if prev_avg is not None and not order.avg_fill_price:
                     order.avg_fill_price = prev_avg
-                prev_filled_qty = getattr(cached_order, 'filled_quantity', None)
+                prev_filled_qty = getattr(cached_order, "filled_quantity", None)
                 if prev_filled_qty is not None and not order.filled_quantity:
                     order.filled_quantity = prev_filled_qty
 
             # Attempt to resolve strategy when missing (prevents 'Subscriber  not found')
-            if not getattr(order, 'strategy', None):
+            if not getattr(order, "strategy", None):
                 # 1. Tag prefix heuristic (tag generated like STRATNAME-XXXXXXXX)
-                if order.tag and hasattr(self, '_subscribers') and self._subscribers:
-                    tag_prefix = order.tag.split('-')[0].upper()
+                if order.tag and hasattr(self, "_subscribers") and self._subscribers:
+                    tag_prefix = order.tag.split("-")[0].upper()
                     try:
                         for sub in self._subscribers:
-                            sub_name = getattr(sub, 'name', '') or str(sub)
+                            sub_name = getattr(sub, "name", "") or str(sub)
                             if sub_name.upper().startswith(tag_prefix):
                                 order.strategy = sub_name
                                 break
                     except Exception:
                         pass
                 # 2. Single subscriber shortcut
-                if not getattr(order, 'strategy', None) and hasattr(self, '_subscribers') and len(self._subscribers) == 1:
+                if (
+                    not getattr(order, "strategy", None)
+                    and hasattr(self, "_subscribers")
+                    and len(self._subscribers) == 1
+                ):
                     only_sub = self._subscribers[0]
-                    order.strategy = getattr(only_sub, 'name', '') or str(only_sub)
+                    order.strategy = getattr(only_sub, "name", "") or str(only_sub)
                 # 3. Fallback to cached order even if strategy empty string above
-                if (not getattr(order, 'strategy', None)) and cached_order and getattr(cached_order, 'strategy', None):
+                if (not getattr(order, "strategy", None)) and cached_order and getattr(cached_order, "strategy", None):
                     order.strategy = cached_order.strategy
 
             # Set timestamps
@@ -1003,8 +1044,13 @@ class ProjectX(Broker):
                 order.updated_at = pd.to_datetime(broker_order["updatedDateTime"])
 
             # Restore bracket meta from persistent map if not already attached
-            if restore_bracket_meta_if_needed(order, self._orders_cache if hasattr(self, '_orders_cache') else {}, getattr(self, '_bracket_meta', {}), self.logger):
-                if getattr(order, '_synthetic_bracket', None):
+            if restore_bracket_meta_if_needed(
+                order,
+                self._orders_cache if hasattr(self, "_orders_cache") else {},
+                getattr(self, "_bracket_meta", {}),
+                self.logger,
+            ):
+                if getattr(order, "_synthetic_bracket", None):
                     order._is_bracket_parent = True
 
             return order
@@ -1031,15 +1077,17 @@ class ProjectX(Broker):
                 return None
 
             # Create Position object
-            quantity = broker_position.get("size", 0)
+            # ProjectX returns size as always positive, with type indicating direction
+            # type: 1 = LONG, type: 2 = SHORT
+            size = broker_position.get("size", 0)
+            pos_type = broker_position.get("type", 1)
+            quantity = size if pos_type == 1 else -size  # Negative for SHORT positions
+
             # Try both field names: avgPrice and averagePrice
             avg_price = broker_position.get("avgPrice") or broker_position.get("averagePrice", 0.0)
 
             position = Position(
-                strategy="",  # Will be set by strategy
-                asset=asset,
-                quantity=quantity,
-                avg_fill_price=avg_price
+                strategy="", asset=asset, quantity=quantity, avg_fill_price=avg_price  # Will be set by strategy
             )
 
             # Set additional properties
@@ -1075,11 +1123,11 @@ class ProjectX(Broker):
             return None
 
         # Check if we already have this in our asset cache
-        if hasattr(self, '_asset_cache') and contract_id in self._asset_cache:
+        if hasattr(self, "_asset_cache") and contract_id in self._asset_cache:
             return self._asset_cache[contract_id]
 
         # Initialize asset cache if not exists
-        if not hasattr(self, '_asset_cache'):
+        if not hasattr(self, "_asset_cache"):
             self._asset_cache = {}
 
         try:
@@ -1170,13 +1218,15 @@ class ProjectX(Broker):
         try:
             if new_order.id in self._orders_cache:
                 cached_order = self._orders_cache[new_order.id]
-                
+
                 # Preserve strategy name from cached order
                 if not new_order.strategy and cached_order.strategy:
                     new_order.strategy = cached_order.strategy
-                    
+
                 if cached_order.status != new_order.status:
-                    self.logger.debug(f"Order status change detected: {new_order.id} {cached_order.status} -> {new_order.status}")
+                    self.logger.debug(
+                        f"Order status change detected: {new_order.id} {cached_order.status} -> {new_order.status}"
+                    )
                     self._dispatch_status_change(cached_order, new_order)
             else:
                 # First time seeing this order
@@ -1193,7 +1243,7 @@ class ProjectX(Broker):
         """Dispatch appropriate event based on status change."""
         try:
             status = new_order.status.lower()
-            
+
             # Map Project X statuses to Lumibot events - After STATUS_ALIAS_MAP normalization
             # Note: statuses have already been normalized through STATUS_ALIAS_MAP in Order class
             if status == "new" or status == "open":
@@ -1202,49 +1252,60 @@ class ProjectX(Broker):
             elif status in ("fill", "filled"):
                 # Filled orders (status=2 becomes "filled" then aliased to "fill")
                 # Ensure bracket metadata is preserved
-                if getattr(cached_order, '_is_bracket_parent', False) and not getattr(new_order, '_is_bracket_parent', False):
+                if getattr(cached_order, "_is_bracket_parent", False) and not getattr(
+                    new_order, "_is_bracket_parent", False
+                ):
                     new_order._is_bracket_parent = True
-                restore_bracket_meta_if_needed(new_order, {getattr(cached_order,'id',None): cached_order} if cached_order else {}, getattr(self, '_bracket_meta', {}), self.logger)
-                if getattr(cached_order, '_is_bracket_child', False) and not getattr(new_order, '_is_bracket_child', False):
+                restore_bracket_meta_if_needed(
+                    new_order,
+                    {getattr(cached_order, "id", None): cached_order} if cached_order else {},
+                    getattr(self, "_bracket_meta", {}),
+                    self.logger,
+                )
+                if getattr(cached_order, "_is_bracket_child", False) and not getattr(
+                    new_order, "_is_bracket_child", False
+                ):
                     new_order._is_bracket_child = True
-                    if hasattr(cached_order, '_bracket_parent_id'):
-                        new_order._bracket_parent_id = getattr(cached_order, '_bracket_parent_id')
+                    if hasattr(cached_order, "_bracket_parent_id"):
+                        new_order._bracket_parent_id = cached_order._bracket_parent_id
 
-                price = getattr(new_order, 'avg_fill_price', None)
+                price = getattr(new_order, "avg_fill_price", None)
                 if price is None:
-                    price = getattr(cached_order, 'avg_fill_price', None)
+                    price = getattr(cached_order, "avg_fill_price", None)
                 if price is None:
-                    price = getattr(new_order, 'limit_price', None) or getattr(new_order, 'stop_price', None)
+                    price = getattr(new_order, "limit_price", None) or getattr(new_order, "stop_price", None)
                 if price is None:
-                    price = getattr(cached_order, 'limit_price', None) or getattr(cached_order, 'stop_price', None)
-                quantity = getattr(new_order, 'filled_quantity', None)
-                if (quantity is None or quantity == 0):
-                    quantity = getattr(cached_order, 'filled_quantity', None)
-                if (quantity is None or quantity == 0):
-                    quantity = getattr(new_order, 'quantity', None) or getattr(cached_order, 'quantity', None)
-                
+                    price = getattr(cached_order, "limit_price", None) or getattr(cached_order, "stop_price", None)
+                quantity = getattr(new_order, "filled_quantity", None)
+                if quantity is None or quantity == 0:
+                    quantity = getattr(cached_order, "filled_quantity", None)
+                if quantity is None or quantity == 0:
+                    quantity = getattr(new_order, "quantity", None) or getattr(cached_order, "quantity", None)
+
                 if price is None:
                     self.logger.debug(f"[FILL PRICE MISSING] Using 0.0 placeholder for order {new_order.id}")
                     price = 0.0
                 if quantity is None:
-                    quantity = getattr(new_order, 'quantity', None) or getattr(cached_order, 'quantity', 0)
+                    quantity = getattr(new_order, "quantity", None) or getattr(cached_order, "quantity", 0)
                 self._process_trade_event(
-                    new_order, 
-                    self.FILLED_ORDER, 
-                    price=price, 
+                    new_order,
+                    self.FILLED_ORDER,
+                    price=price,
                     filled_quantity=quantity,
-                    multiplier=new_order.asset.multiplier if new_order.asset else 1
+                    multiplier=new_order.asset.multiplier if new_order.asset else 1,
                 )
                 # Bracket parent: spawn children after processing fill event (even if price fallback)
                 # Use helper _is_bracket_parent to fall back on stored meta map if attribute missing
-                if self._is_bracket_parent(new_order) and not getattr(new_order, '_bracket_children_submitted', False):
-                    self.logger.debug(f"[BRACKET SPAWN CHECK] parent_id={new_order.id} has_meta={hasattr(new_order,'_synthetic_bracket')} meta={getattr(new_order,'_synthetic_bracket',None)}")
+                if self._is_bracket_parent(new_order) and not getattr(new_order, "_bracket_children_submitted", False):
+                    self.logger.debug(
+                        f"[BRACKET SPAWN CHECK] parent_id={new_order.id} has_meta={hasattr(new_order,'_synthetic_bracket')} meta={getattr(new_order,'_synthetic_bracket',None)}"
+                    )
                     try:
                         self._maybe_spawn_bracket_children(new_order)
                     except Exception as be:
                         self.logger.error(f"Bracket child spawn failed for parent {new_order.id}: {be}")
                 # Bracket child: handle sibling cancellation
-                if getattr(new_order, '_is_bracket_child', False):
+                if getattr(new_order, "_is_bracket_child", False):
                     try:
                         self._handle_bracket_child_fill(new_order)
                     except Exception as ce:
@@ -1257,29 +1318,31 @@ class ProjectX(Broker):
                 # Rejected orders (status=5 becomes "rejected" then aliased to "error")
                 self._process_trade_event(new_order, self.ERROR_ORDER)
                 # If bracket child errors, deactivate bracket
-                if getattr(new_order, '_is_bracket_child', False):
+                if getattr(new_order, "_is_bracket_child", False):
                     parent_id = self._bracket_parent_by_child_id.get(new_order.id)
                     parent = self._orders_cache.get(parent_id) if parent_id else None
-                    if parent and getattr(parent, '_synthetic_bracket', None):
-                        parent._synthetic_bracket['active'] = False
+                    if parent and getattr(parent, "_synthetic_bracket", None):
+                        parent._synthetic_bracket["active"] = False
             elif status == "partial_fill":
                 # Partially filled orders (status=7 if supported)
-                price = getattr(new_order, 'avg_fill_price', None) or getattr(new_order, 'limit_price', None)
-                quantity = getattr(new_order, 'filled_quantity', None) or getattr(new_order, 'quantity', None)
-                
+                price = getattr(new_order, "avg_fill_price", None) or getattr(new_order, "limit_price", None)
+                quantity = getattr(new_order, "filled_quantity", None) or getattr(new_order, "quantity", None)
+
                 if price is not None and quantity is not None:
                     self._process_trade_event(
                         new_order,
                         self.PARTIALLY_FILLED_ORDER,
                         price=price,
-                        filled_quantity=quantity, 
-                        multiplier=new_order.asset.multiplier if new_order.asset else 1
+                        filled_quantity=quantity,
+                        multiplier=new_order.asset.multiplier if new_order.asset else 1,
                     )
                 else:
-                    self.logger.warning(f"Partial fill event missing price ({price}) or quantity ({quantity}) data for order {new_order.id}")
+                    self.logger.warning(
+                        f"Partial fill event missing price ({price}) or quantity ({quantity}) data for order {new_order.id}"
+                    )
             else:
                 self.logger.debug(f"Unknown or unhandled order status for event dispatch: {status}")
-                
+
         except Exception as e:
             self.logger.error(f"Error dispatching status change for order {new_order.id}: {e}")
 
@@ -1298,22 +1361,26 @@ class ProjectX(Broker):
     #   - Spawn predicate centralizes gate conditions; reasons logged at DEBUG for diagnostics.
     # Helpers live in projectx_helpers.py to keep this broker lean and testable.
     def _is_bracket_parent(self, order: Order) -> bool:
-        if getattr(order, '_is_bracket_parent', False):
+        if getattr(order, "_is_bracket_parent", False):
             return True
-        return bool(getattr(self, '_bracket_meta', {}).get(getattr(order, 'id', None)))
+        return bool(getattr(self, "_bracket_meta", {}).get(getattr(order, "id", None)))
 
     def _is_bracket_child(self, order: Order) -> bool:
-        return getattr(order, '_is_bracket_child', False)
+        return getattr(order, "_is_bracket_child", False)
 
     def _maybe_spawn_bracket_children(self, parent: Order):
         """Spawn TP/SL child orders for a filled bracket parent."""
         try:
-            self.logger.debug(f"[BRACKET SPAWN ENTER] parent={getattr(parent,'id',None)} is_parent={self._is_bracket_parent(parent)} meta_attached={hasattr(parent,'_synthetic_bracket')}")
+            self.logger.debug(
+                f"[BRACKET SPAWN ENTER] parent={getattr(parent,'id',None)} is_parent={self._is_bracket_parent(parent)} meta_attached={hasattr(parent,'_synthetic_bracket')}"
+            )
             if not self._is_bracket_parent(parent):
                 if parent.id not in self._bracket_meta:
-                    self.logger.debug(f"[BRACKET SPAWN ABORT] not parent and no meta parent={getattr(parent,'id',None)}")
+                    self.logger.debug(
+                        f"[BRACKET SPAWN ABORT] not parent and no meta parent={getattr(parent,'id',None)}"
+                    )
                     return
-            meta = getattr(parent, '_synthetic_bracket', None)
+            meta = getattr(parent, "_synthetic_bracket", None)
             if not meta:
                 meta = self._bracket_meta.get(parent.id)
                 if not meta:
@@ -1326,30 +1393,32 @@ class ProjectX(Broker):
             if not eligible:
                 self.logger.debug(f"[BRACKET SPAWN ABORT] parent={parent.id} reason={reason}")
                 return
-            tp_price = meta.get('tp_price')
-            sl_price = meta.get('sl_price')
-            meta['children_submitted'] = True
+            tp_price = meta.get("tp_price")
+            sl_price = meta.get("sl_price")
+            meta["children_submitted"] = True
             parent._bracket_children_submitted = True
-            base_tag = meta.get('base_tag') or derive_base_tag(parent.tag or '')
+            base_tag = meta.get("base_tag") or derive_base_tag(parent.tag or "")
             if tp_price is not None:
                 try:
                     self.logger.debug(f"[BRACKET SPAWN] creating TP child parent={parent.id} price={tp_price}")
-                    tp_child = self._create_bracket_child(parent, kind='tp', price=tp_price, base_tag=base_tag)
+                    tp_child = self._create_bracket_child(parent, kind="tp", price=tp_price, base_tag=base_tag)
                     if tp_child and tp_child.id:
-                        meta['children']['tp'] = tp_child.id
+                        meta["children"]["tp"] = tp_child.id
                         self._bracket_parent_by_child_id[tp_child.id] = parent.id
                 except Exception as e:
                     self.logger.error(f"Failed to submit TP child for parent {parent.id}: {e}")
             if sl_price is not None:
                 try:
                     self.logger.debug(f"[BRACKET SPAWN] creating SL child parent={parent.id} price={sl_price}")
-                    sl_child = self._create_bracket_child(parent, kind='sl', price=sl_price, base_tag=base_tag)
+                    sl_child = self._create_bracket_child(parent, kind="sl", price=sl_price, base_tag=base_tag)
                     if sl_child and sl_child.id:
-                        meta['children']['sl'] = sl_child.id
+                        meta["children"]["sl"] = sl_child.id
                         self._bracket_parent_by_child_id[sl_child.id] = parent.id
                 except Exception as e:
                     self.logger.error(f"Failed to submit SL child for parent {parent.id}: {e}")
-            self.logger.debug(f"[BRACKET SPAWN COMPLETE] parent={parent.id} tp_child={meta.get('children',{}).get('tp')} sl_child={meta.get('children',{}).get('sl')}")
+            self.logger.debug(
+                f"[BRACKET SPAWN COMPLETE] parent={parent.id} tp_child={meta.get('children',{}).get('tp')} sl_child={meta.get('children',{}).get('sl')}"
+            )
         except Exception as e:
             self.logger.error(f"[BRACKET SPAWN ERROR] parent={getattr(parent,'id',None)} error={e}")
 
@@ -1360,35 +1429,38 @@ class ProjectX(Broker):
             strategy=parent.strategy,
             asset=parent.asset,
             quantity=parent.quantity,
-            side=spec['side'],
-            order_type=spec['order_type'],
-            identifier=None
+            side=spec["side"],
+            order_type=spec["order_type"],
+            identifier=None,
         )
         # Mark as child to bypass bracket detection
         child._is_bracket_child = True
         child._bracket_parent_id = parent.id
         try:
             from datetime import datetime
+
             child.created_at = datetime.now()
         except Exception:
             pass
-        child.tag = spec['tag']
+        child.tag = spec["tag"]
         # Attach lightweight meta pointer for diagnostics (not full meta copy to avoid divergence)
         try:
             child._synthetic_bracket_child = True
         except Exception:
             pass
         # Assign prices
-        if spec['price_key'] == 'limit_price':
-            child.limit_price = spec['price_value']
+        if spec["price_key"] == "limit_price":
+            child.limit_price = spec["price_value"]
         else:
-            child.stop_price = spec['price_value']
+            child.stop_price = spec["price_value"]
         # Submit
         submitted = self._submit_order(child)
-        if not submitted or not getattr(submitted, 'id', None):
+        if not submitted or not getattr(submitted, "id", None):
             self.logger.error(f"Bracket child submission failed (kind={kind}) for parent {parent.id}")
         else:
-            self.logger.debug(f"Bracket child submitted: parent={parent.id} kind={kind} id={submitted.id} price={price}")
+            self.logger.debug(
+                f"Bracket child submitted: parent={parent.id} kind={kind} id={submitted.id} price={price}"
+            )
         return submitted
 
     def _handle_bracket_child_fill(self, child: Order):
@@ -1397,13 +1469,13 @@ class ProjectX(Broker):
         if not parent_id:
             return
         parent = self._orders_cache.get(parent_id)
-        if not parent or not getattr(parent, '_synthetic_bracket', None):
+        if not parent or not getattr(parent, "_synthetic_bracket", None):
             return
         meta = parent._synthetic_bracket
-        if not meta.get('active', False):
+        if not meta.get("active", False):
             return
         # Determine sibling
-        siblings = meta.get('children', {})
+        siblings = meta.get("children", {})
         sibling_id = None
         for k, v in siblings.items():
             if v != child.id:
@@ -1412,16 +1484,18 @@ class ProjectX(Broker):
         if sibling_id and sibling_id in self._orders_cache:
             sibling_order = self._orders_cache[sibling_id]
             # Cancel only if not terminal already
-            sibling_status = (getattr(sibling_order, 'status', '') or '').lower()
+            sibling_status = (getattr(sibling_order, "status", "") or "").lower()
             if sibling_status not in {"fill", "filled", "canceled", "cancelled", "error"}:
                 try:
                     self.cancel_order(sibling_order)
-                    self.logger.debug(f"[BRACKET SIBLING CANCEL] canceled sibling={sibling_id} after child_fill={child.id}")
+                    self.logger.debug(
+                        f"[BRACKET SIBLING CANCEL] canceled sibling={sibling_id} after child_fill={child.id}"
+                    )
                 except Exception as e:
                     self.logger.error(f"Failed cancel sibling {sibling_id} for parent {parent_id}: {e}")
         # Deactivate bracket
-        meta['active'] = False
-            
+        meta["active"] = False
+
     def _handle_pre_existing_order(self, order):
         """Handle orders that existed before strategy started."""
         try:
@@ -1429,15 +1503,21 @@ class ProjectX(Broker):
             if self._first_iteration:
                 if order.status.lower() == "fill":
                     self._process_trade_event(order, self.NEW_ORDER)
-                    price = getattr(order, 'avg_fill_price', None) or getattr(order, 'limit_price', None)
-                    quantity = getattr(order, 'filled_quantity', None) or getattr(order, 'quantity', None)
+                    price = getattr(order, "avg_fill_price", None) or getattr(order, "limit_price", None)
+                    quantity = getattr(order, "filled_quantity", None) or getattr(order, "quantity", None)
                     if price and quantity:
-                        self._process_trade_event(order, self.FILLED_ORDER, price=price, filled_quantity=quantity, multiplier=order.asset.multiplier if order.asset else 1)
+                        self._process_trade_event(
+                            order,
+                            self.FILLED_ORDER,
+                            price=price,
+                            filled_quantity=quantity,
+                            multiplier=order.asset.multiplier if order.asset else 1,
+                        )
                 elif order.status.lower() == "canceled":
                     self._process_trade_event(order, self.NEW_ORDER)
                     self._process_trade_event(order, self.CANCELED_ORDER)
                 elif order.status.lower() == "error":
-                    self._process_trade_event(order, self.NEW_ORDER) 
+                    self._process_trade_event(order, self.NEW_ORDER)
                     self._process_trade_event(order, self.ERROR_ORDER)
                 else:
                     # Just process as new
@@ -1454,7 +1534,7 @@ class ProjectX(Broker):
         """Handle order update from streaming."""
         try:
             # Process streaming order updates
-            
+
             # Stream can deliver a single dict or a list of dicts
             payloads = data if isinstance(data, list) else [data]
             for item in payloads:
@@ -1462,18 +1542,18 @@ class ProjectX(Broker):
                 if not isinstance(item, dict):
                     self.logger.debug(f"Unexpected order item type: {type(item)}")
                     continue
-                
+
                 # Extract the actual order data from the wrapper
                 # Format is {'action': 1, 'data': {...actual order data...}}
-                order_data = item.get('data', item)  # Use item itself if no 'data' key
-                    
+                order_data = item.get("data", item)  # Use item itself if no 'data' key
+
                 # Process order data from streaming
-                
+
                 order = self._convert_broker_order_to_lumibot_order(order_data)
                 if order is not None:
                     # KEY FIX: Detect status changes and dispatch lifecycle events
                     self._detect_and_dispatch_order_changes(order)
-                    
+
                     # Update cache after processing events
                     self._orders_cache[order.id] = order
                     self.logger.debug(f"Order update processed: {order.id} -> {order.status}")
@@ -1496,7 +1576,7 @@ class ProjectX(Broker):
         """Handle trade update from streaming - trades are ground truth for fills."""
         try:
             # Process streaming trade updates
-            
+
             # Process trade events to detect fills
             payloads = data if isinstance(data, list) else [data]
             for item in payloads:
@@ -1504,37 +1584,36 @@ class ProjectX(Broker):
                 if not isinstance(item, dict):
                     self.logger.debug(f"Unexpected trade item type: {type(item)}")
                     continue
-                
+
                 # Extract the actual trade data from the wrapper
                 # Format is {'action': 0, 'data': {...actual trade data...}}
-                trade_data = item.get('data', item)  # Use item itself if no 'data' key
-                    
+                trade_data = item.get("data", item)  # Use item itself if no 'data' key
+
                 # Process trade data from streaming
-                
+
                 # Extract order ID from trade - trades use 'orderId' to reference the order
                 order_id = str(trade_data.get("orderId")) if trade_data.get("orderId") else None
-                
+
                 if order_id and order_id in self._orders_cache:
                     order = self._orders_cache[order_id]
-                    
+
                     # Update order with fill information from trade
                     fill_price = trade_data.get("price")
                     fill_size = trade_data.get("size")
-                    
+
                     if fill_price and fill_size:
                         # Mark order as filled based on trade data
                         order.status = "filled"
                         order.filled_quantity = fill_size
                         order.avg_fill_price = fill_price
-                        
+
                         # Dispatch fill event - pass same order twice since it's the updated version
                         self._dispatch_status_change(order, order)
-                        
-                        self.logger.debug(f"Trade fill processed for order {order_id}: "
-                                        f"{fill_size} @ {fill_price}")
+
+                        self.logger.debug(f"Trade fill processed for order {order_id}: " f"{fill_size} @ {fill_price}")
                 elif order_id:
                     self.logger.debug(f"Trade for unknown order {order_id} - might be pre-existing")
-            
+
             # Trade updates can trigger order and position cache updates
             self._update_orders_cache()
             self._update_positions_cache()
@@ -1558,4 +1637,5 @@ class ProjectX(Broker):
     def _add_subscriber(self, subscriber):
         """Override to sync orders when a strategy is added."""
         super()._add_subscriber(subscriber)
+
     # No adapter-level sync; core Broker handles first-iteration lifecycle

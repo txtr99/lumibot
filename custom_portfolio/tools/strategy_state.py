@@ -151,8 +151,11 @@ class StrategyState:
         if timestamp is None:
             timestamp = datetime.now()
 
-        # Calculate P&L
-        pnl = (exit_price - entry_price) * quantity
+        # Calculate P&L with proper contract multiplier
+        from custom_portfolio.data.futures_metadata import get_multiplier
+
+        multiplier = get_multiplier(self.symbol)
+        pnl = (exit_price - entry_price) * quantity * multiplier
 
         # Create trade record
         trade = {
@@ -162,6 +165,7 @@ class StrategyState:
             "entry_price": entry_price,
             "exit_price": exit_price,
             "quantity": quantity,
+            "multiplier": multiplier,
             "pnl": pnl,
         }
 

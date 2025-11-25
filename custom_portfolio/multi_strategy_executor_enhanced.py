@@ -29,23 +29,30 @@ Author: LumiBot Multi-Strategy Team
 Date: 2025-11-18 (Enhanced Version)
 """
 
+import json
 import logging
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from custom_portfolio.data.futures_metadata import get_multiplier
-from custom_portfolio.data.topstep_fee_table import get_per_order_fee
+from custom_portfolio.data.futures_metadata import get_multiplier, get_per_order_fee
 from custom_portfolio.tools.global_rate_limiter import GlobalRateLimiter
 from custom_portfolio.tools.shared_data_manager import SharedDataManager
 from custom_portfolio.tools.strategy_attribution import StrategyAttribution
 from custom_portfolio.tools.strategy_state import StrategyState
 from lumibot.entities import Asset, Order
 
+# Terminal color codes
 _YELLOW = "\x1b[33m"
+_BRIGHT_YELLOW = "\x1b[93m"
 _RESET = "\x1b[0m"
+
+# Metadata verification constants
+_METADATA_STALENESS_DAYS = 60
+_METADATA_VERIFICATION_FILE = Path(__file__).parent.parent.parent / ".metadata_last_verified"
 
 
 class EnhancedStrategyState(StrategyState):
@@ -281,6 +288,64 @@ class MultiStrategyExecutorEnhanced:
         # Statistics
         self.iteration_count = 0
         self.total_orders_submitted = 0
+
+        # Check metadata staleness on startup
+        self._check_metadata_staleness()
+
+    def _check_metadata_staleness(self) -> None:
+        """Check if futures metadata verification is stale and warn if needed."""
+        try:
+            if not _METADATA_VERIFICATION_FILE.exists():
+                self._print_metadata_warning("Metadata verification file not found")
+                return
+
+            with open(_METADATA_VERIFICATION_FILE) as f:
+                data = json.load(f)
+
+            timestamp_str = data.get("timestamp")
+            if not timestamp_str:
+                self._print_metadata_warning("No timestamp in verification file")
+                return
+
+            last_verified = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+            days_old = (datetime.now(last_verified.tzinfo) - last_verified).days
+
+            if days_old > _METADATA_STALENESS_DAYS:
+                self._print_metadata_warning(f"Metadata verification is {days_old} days old")
+
+        except Exception as e:
+            self.logger.debug(f"Could not check metadata staleness: {e}")
+
+    def _print_metadata_warning(self, reason: str) -> None:
+        """Print a prominent metadata staleness warning."""
+        box_width = 64
+        msg1 = f"METADATA VERIFICATION STALE ({reason})"
+        msg2 = "Run: python tools/verify_topstep_metadata.py"
+
+        print(f"\n{_BRIGHT_YELLOW}")
+        print("=" * box_width)
+        print(f"  WARNING: {msg1}")
+        print(f"  {msg2}")
+        print("=" * box_width)
+        print(f"{_RESET}\n")
+
+    def print_multiplier_warnings(self) -> None:
+        """Print warning if any symbols had multiplier default to 1.0 during the session."""
+        from lumibot.tools.virtual_position_tracker import get_multiplier_defaults
+
+        defaults = get_multiplier_defaults()
+        if not defaults:
+            return
+
+        box_width = 64
+        print(f"\n{_BRIGHT_YELLOW}")
+        print("=" * box_width)
+        print("  WARNING: MULTIPLIER DEFAULTED TO 1.0 FOR THESE SYMBOLS:")
+        for symbol in sorted(defaults):
+            print(f"      - {symbol} (P/L may be incorrect by 10-100x)")
+        print("  Run: python tools/verify_topstep_metadata.py to fix")
+        print("=" * box_width)
+        print(f"{_RESET}\n")
 
     def _wilder_atr(self, high: pd.Series, low: pd.Series, close: pd.Series, period: int = 20) -> pd.Series:
         """Calculate Wilder's ATR (Average True Range)."""
@@ -1224,8 +1289,12 @@ class MultiStrategyExecutorEnhanced:
         if orders:
             self._log_verbose(f"Forcing flatten of {len(orders)} open positions at end of run")
             count = self._execute_all_orders(orders, current_time)
+            # Print multiplier warnings at end of run
+            self.print_multiplier_warnings()
             return count, forced_details
 
+        # Print multiplier warnings even if no positions to flatten
+        self.print_multiplier_warnings()
         return 0, forced_details
 
     def __repr__(self) -> str:

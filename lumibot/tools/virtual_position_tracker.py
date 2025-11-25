@@ -11,7 +11,21 @@ doesn't reliably report positions created from API-placed orders.
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
+
+# Module-level tracking for symbols where multiplier defaulted to 1.0
+# This allows end-of-run warnings about potentially incorrect P/L
+_multiplier_defaults: Set[str] = set()
+
+
+def get_multiplier_defaults() -> Set[str]:
+    """Return symbols that had multiplier default to 1.0 during this session."""
+    return _multiplier_defaults.copy()
+
+
+def clear_multiplier_defaults() -> None:
+    """Clear the multiplier defaults tracking (call at session start)."""
+    _multiplier_defaults.clear()
 
 
 @dataclass
@@ -46,9 +60,14 @@ class VirtualPosition:
             return 0.0
         try:
             from custom_portfolio.data.futures_metadata import get_multiplier
+
             multiplier = get_multiplier(self.symbol)
+            # Track if multiplier returned default value of 1.0
+            if multiplier == 1.0:
+                _multiplier_defaults.add(self.symbol)
         except Exception:
             multiplier = 1.0
+            _multiplier_defaults.add(self.symbol)
         return self.quantity * (current_price - self.avg_entry_price) * multiplier
 
 
