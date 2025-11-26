@@ -119,3 +119,14 @@ def generate_signal(state, df):
     if go_short(state, df):
         return "SELL"
     return "HOLD"
+
+
+def get_signal_visibility(state, df):
+    """Return list of (label, is_true) for live status display."""
+    indicators = populate_indicators(df, state.params)
+    ker_cross = indicators["ker_prev"] >= 0.50 and indicators["ker_current"] < 0.50
+    return [
+        ("KERx.5", ker_cross),
+        ("SMA3↓", indicators["sma_3_current"] < indicators["sma_3_2ago"]),
+        ("EMA100↑", indicators["ema_100_current"] > indicators["ema_100_prev"]),
+    ]

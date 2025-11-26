@@ -13,6 +13,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Optional, Set
 
+# Epsilon for floating point comparisons (1e-9 is effectively zero for position quantities)
+POSITION_EPSILON = 1e-9
+
 # Module-level tracking for symbols where multiplier defaulted to 1.0
 # This allows end-of-run warnings about potentially incorrect P/L
 _multiplier_defaults: Set[str] = set()
@@ -87,8 +90,12 @@ class VirtualPositionTracker:
         self.positions: Dict[str, VirtualPosition] = {}
         self.trade_history = []
         self.start_time = datetime.now()
+        # Track processed order IDs to prevent double-counting
+        self._processed_order_ids: Set[str] = set()
 
-    def execute_order(self, symbol: str, quantity: float, side: str, price: float = None) -> VirtualPosition:
+    def execute_order(
+        self, symbol: str, quantity: float, side: str, price: float = None, order_id: str = None
+    ) -> Optional[VirtualPosition]:
         """
         Execute a virtual order and update position.
 
@@ -97,10 +104,20 @@ class VirtualPositionTracker:
             quantity: Number of contracts (always positive)
             side: "buy" or "sell"
             price: Fill price (if known), otherwise uses last known price
+            order_id: Unique order ID for idempotency (prevents double-counting)
 
         Returns:
-            Updated virtual position
+            Updated virtual position, or None if order was already processed
         """
+        # Idempotency check - prevent double-counting if same order processed twice
+        if order_id:
+            if order_id in self._processed_order_ids:
+                return self.positions.get(symbol)  # Return current position without update
+            self._processed_order_ids.add(order_id)
+
+        # Validate quantity
+        if quantity <= 0:
+            raise ValueError(f"Quantity must be positive, got {quantity}")
         # Convert side to signed quantity
         signed_qty = quantity if side.lower() == "buy" else -quantity
 
@@ -127,16 +144,17 @@ class VirtualPositionTracker:
                 if price:
                     new_cost = abs(signed_qty * price)
                     pos.total_cost += new_cost
-                    if new_qty != 0:
+                    if abs(new_qty) > POSITION_EPSILON:
                         pos.avg_entry_price = pos.total_cost / abs(new_qty)
-            elif new_qty == 0:
-                # Position closed
+            elif abs(new_qty) < POSITION_EPSILON:
+                # Position closed (use epsilon for floating point safety)
                 pos.quantity = 0
                 pos.total_cost = 0
+                new_qty = 0  # Normalize to exactly zero
                 # Keep last entry price for record
             else:
                 # Reducing position - keep same average
-                if new_qty != 0:
+                if abs(new_qty) > POSITION_EPSILON:
                     pos.total_cost = abs(new_qty * pos.avg_entry_price)
 
             pos.quantity = new_qty
@@ -158,10 +176,19 @@ class VirtualPositionTracker:
                 "quantity": quantity,
                 "price": price,
                 "position_after": self.positions[symbol].quantity,
+                "order_id": order_id,
             }
         )
 
         return self.positions[symbol]
+
+    def was_order_processed(self, order_id: str) -> bool:
+        """Check if an order ID has already been processed (for idempotency checks)."""
+        return order_id in self._processed_order_ids
+
+    def get_processed_order_count(self) -> int:
+        """Get count of processed orders (for debugging/stats)."""
+        return len(self._processed_order_ids)
 
     def get_position(self, symbol: str) -> Optional[VirtualPosition]:
         """Get current virtual position for a symbol."""
@@ -239,3 +266,28 @@ class VirtualPositionTracker:
         self.positions.clear()
         self.trade_history.clear()
         self.start_time = datetime.now()
+
+    def force_flat(self, symbol: str) -> Optional[VirtualPosition]:
+        """
+        Force a symbol's position to flat without recording a trade.
+
+        Used during maintenance windows when the exchange auto-flattens positions.
+        Does NOT record a trade since no actual fill occurred - only syncs
+        virtual state with known exchange state.
+
+        Args:
+            symbol: Symbol to flatten
+
+        Returns:
+            The flattened position (with quantity=0), or None if no position existed
+        """
+        pos = self.positions.get(symbol)
+        if pos is None:
+            return None
+
+        # Zero out the position
+        pos.quantity = 0
+        pos.total_cost = 0
+        pos.last_update = datetime.now()
+
+        return pos

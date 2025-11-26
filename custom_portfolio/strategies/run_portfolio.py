@@ -151,7 +151,8 @@ import os
 import signal
 import sys
 import time
-from datetime import datetime, time as dtime
+from datetime import datetime
+from datetime import time as dtime
 from functools import lru_cache
 from pathlib import Path
 
@@ -178,6 +179,124 @@ from lumibot.strategies import Strategy  # noqa: E402
 # Global flag for interrupt handling
 _interrupted = False
 
+# Trend sentiment cache (refreshes every 5 minutes)
+_trend_sentiment_cache = {"data": None, "timestamp": 0}
+_TREND_REFRESH_SECONDS = 300  # 5 minutes
+
+
+def get_trend_sentiment_table(symbols: list[str], force_refresh: bool = False) -> str:
+    """
+    Get color-coded trend sentiment table for display.
+
+    Args:
+        symbols: List of symbols to analyze (e.g., ["MES", "MNQ", "MGC"])
+        force_refresh: Force refresh even if cache is valid
+
+    Returns:
+        Formatted string with color-coded table
+    """
+    import time as time_module
+
+    from custom_portfolio.tools.llm_trend_sentiment import build_vibes
+
+    global _trend_sentiment_cache
+
+    now = time_module.time()
+    cache_age = now - _trend_sentiment_cache["timestamp"]
+
+    # Use cache if valid and not forcing refresh
+    if not force_refresh and _trend_sentiment_cache["data"] and cache_age < _TREND_REFRESH_SECONDS:
+        vibes = _trend_sentiment_cache["data"]
+    else:
+        # Fetch fresh data (suppress fetch messages)
+        import io
+        import sys
+
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            vibes, _ = build_vibes(
+                symbols,
+                lookback_minutes=240,
+                use_sim=False,
+                latency_minutes=10,
+                dataset="GLBX.MDP3",
+                schema="ohlcv-1m",
+            )
+        finally:
+            sys.stdout = old_stdout
+
+        _trend_sentiment_cache["data"] = vibes
+        _trend_sentiment_cache["timestamp"] = now
+
+    # Build color-coded table
+    # ANSI colors
+    RED = "\033[91m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    CYAN = "\033[96m"
+    GRAY = "\033[90m"
+    RESET = "\033[0m"
+
+    lines = []
+    lines.append(f"{CYAN}┌────────┬────────┬──────┬─────────────┐{RESET}")
+    lines.append(f"{CYAN}│ Symbol │ Trend  │ Vol  │ Vibe        │{RESET}")
+    lines.append(f"{CYAN}├────────┼────────┼──────┼─────────────┤{RESET}")
+
+    for symbol in symbols:
+        v = vibes.get(symbol, {"trend": "?", "vol": "?", "vibe": "no data"})
+        trend = v["trend"]
+        vol = v["vol"]
+        vibe = v["vibe"]
+
+        # Color trend
+        if trend == "up":
+            trend_col = f"{GREEN}{trend.center(6)}{RESET}"
+        elif trend == "down":
+            trend_col = f"{RED}{trend.center(6)}{RESET}"
+        else:
+            trend_col = f"{GRAY}{trend.center(6)}{RESET}"
+
+        # Color vol
+        if vol == "high":
+            vol_col = f"{RED}{vol.center(4)}{RESET}"
+        elif vol == "low":
+            vol_col = f"{GRAY}{vol.center(4)}{RESET}"
+        else:
+            vol_col = f"{YELLOW}{vol.center(4)}{RESET}"
+
+        # Color vibe
+        vibe_colors = {
+            "surging": GREEN,
+            "climbing": GREEN,
+            "calm rise": GREEN,
+            "crashing": RED,
+            "sliding": RED,
+            "drifting": YELLOW,
+            "choppy": YELLOW,
+            "ranging": GRAY,
+            "quiet": GRAY,
+        }
+        vibe_color = vibe_colors.get(vibe, GRAY)
+        vibe_col = f"{vibe_color}{vibe.ljust(11)}{RESET}"
+
+        row = f"{CYAN}│{RESET} {symbol:<6} {CYAN}│{RESET} {trend_col} {CYAN}│{RESET}"
+        row += f" {vol_col} {CYAN}│{RESET} {vibe_col} {CYAN}│{RESET}"
+        lines.append(row)
+
+    lines.append(f"{CYAN}└────────┴────────┴──────┴─────────────┘{RESET}")
+
+    # Add cache age indicator (recalculate from current timestamp)
+    actual_age = time_module.time() - _trend_sentiment_cache["timestamp"]
+    cache_mins = int(actual_age // 60)
+    cache_secs = int(actual_age % 60)
+    if cache_mins > 0:
+        lines.append(f"{GRAY}  (data age: {cache_mins}m {cache_secs}s){RESET}")
+    else:
+        lines.append(f"{GRAY}  (data age: {cache_secs}s){RESET}")
+
+    return "\n".join(lines)
+
 
 def signal_handler(signum, frame):
     """Handle CTRL-C gracefully."""
@@ -197,11 +316,18 @@ def setup_logging(log_level: str = "INFO") -> None:
     Args:
         log_level: Logging level (DEBUG, INFO, WARNING, ERROR)
     """
+    # Main log file (all levels)
     logging.basicConfig(
         level=getattr(logging, log_level.upper()),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         handlers=[logging.StreamHandler(), logging.FileHandler("portfolio_runner.log")],
     )
+
+    # Separate error-only log file (always captures ERROR and CRITICAL)
+    error_handler = logging.FileHandler("portfolio_errors.log")
+    error_handler.setLevel(logging.ERROR)
+    error_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    logging.getLogger().addHandler(error_handler)
 
 
 def _env_flag(name: str, default: bool = True) -> bool:
@@ -228,8 +354,23 @@ def _snapshot_config():
 
 
 def _simulate_fills_config():
-    """Read DRY_RUN env to control simulated fills (default true)."""
+    """Read DRY_RUN env to control simulated fills (default true for backtest)."""
     return os.environ.get("DRY_RUN", "true").lower() == "true"
+
+
+def _live_dry_run_config():
+    """
+    Read DRY_RUN env for live trading mode.
+
+    In LIVE mode, the default is FALSE (real trading).
+    User must explicitly set DRY_RUN=true to enable dry-run mode.
+
+    Returns:
+        bool: True if dry-run mode enabled, False for real trading
+    """
+    raw = os.environ.get("DRY_RUN", "").strip().lower()
+    # Only enable dry-run if explicitly set to true
+    return raw in ("true", "1", "yes", "y", "on")
 
 
 def _capital_config():
@@ -273,8 +414,8 @@ def _cme_holiday_calendar():
     """Return a pandas holiday calendar covering major CME US holidays (approximate)."""
     from pandas.tseries.holiday import (
         AbstractHolidayCalendar,
-        Holiday,
         GoodFriday,
+        Holiday,
         USLaborDay,
         USMemorialDay,
         USPresidentsDay,
@@ -304,9 +445,7 @@ def _compute_expected_minutes_totals(expected_per_day: dict):
     return eth_total, rth_total
 
 
-def _expected_minutes_by_day(
-    start_dt, end_dt, eth_minutes_per_day: int = 1335, rth_minutes_per_day: int = 390
-):
+def _expected_minutes_by_day(start_dt, end_dt, eth_minutes_per_day: int = 1335, rth_minutes_per_day: int = 390):
     """
     Expected minutes per day (ETH/RTH) with weekend/holiday skips, maintenance deduction,
     and clipping to the backtest window (handles partial first/last day).
@@ -489,7 +628,9 @@ def _run_backtest_data_qa(data_source, start_dt, end_dt, qa_tz: str = "UTC"):
                 delta_min = (arr[1:].asi8 - arr[:-1].asi8) // 60_000_000_000  # ns -> minutes
                 day_arr = np.array([ts.date() for ts in arr])
                 same_day = day_arr[1:] == day_arr[:-1]
-                exp_arr = np.fromiter((expected_per_day.get(d, (0, 0))[0] for d in day_arr[1:]), dtype=int, count=len(day_arr) - 1)
+                exp_arr = np.fromiter(
+                    (expected_per_day.get(d, (0, 0))[0] for d in day_arr[1:]), dtype=int, count=len(day_arr) - 1
+                )
                 gap_mask = (delta_min > 1) & same_day & (exp_arr > 0)
                 if gap_mask.any():
                     missing_count = int(np.sum(delta_min[gap_mask] - 1))
@@ -1377,22 +1518,58 @@ def run_live(args):
 
     Args:
         args: Command line arguments
+
+    Environment Variables:
+        DRY_RUN: Set to 'true' to enable dry-run mode (no real orders).
+                 Default is FALSE for live trading (real orders).
     """
-    print("=" * 70)
-    print("RUNNING PORTFOLIO LIVE TRADING")
-    print("=" * 70)
-    print("⚠️  LIVE TRADING MODE - REAL ORDERS WILL BE PLACED")
-    print("")
+    # Register signal handler for CTRL-C to ensure clean shutdown
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # Clear log files for fresh start
+    for log_file in ["portfolio_errors.log", "portfolio_runner.log"]:
+        if os.path.exists(log_file):
+            open(log_file, "w").close()
+            print(f"Cleared {log_file} for fresh session")
+
+    from custom_portfolio.tools.terminal_formatter import TerminalFormatter as TF
+
     enable_snapshots, max_snapshots, timestep = _snapshot_config()
-    simulate_fills = _simulate_fills_config()
+    dry_run_mode = _live_dry_run_config()
     shared_initial_capital = _capital_config()
     deep_portfolio_debug = _deep_debug_config()
 
-    # Confirmation prompt
-    confirm = input("Are you sure you want to run in LIVE mode? (yes/no): ")
-    if confirm.lower() != "yes":
-        print("Live trading cancelled.")
-        return
+    print("=" * 70)
+    if dry_run_mode:
+        print("RUNNING PORTFOLIO IN DRY-RUN MODE")
+        print("=" * 70)
+        print(
+            TF.warning(
+                "DRY-RUN MODE ACTIVE\n"
+                "  - Orders will be SIMULATED, not submitted to exchange\n"
+                "  - Virtual positions tracked locally\n"
+                "  - Useful for testing strategy logic without real trades\n"
+                "  - Set DRY_RUN=false to enable real trading"
+            )
+        )
+    else:
+        print("RUNNING PORTFOLIO LIVE TRADING")
+        print("=" * 70)
+        print(TF.error("⚠️  LIVE TRADING MODE - REAL ORDERS WILL BE PLACED"))
+    print("")
+
+    # Confirmation prompt (different for dry-run vs real)
+    if dry_run_mode:
+        confirm = input("Start dry-run mode? (yes/no): ")
+        if confirm.lower() != "yes":
+            print("Dry-run cancelled.")
+            return
+    else:
+        confirm = input("Are you sure you want to run in LIVE mode with REAL orders? (yes/no): ")
+        if confirm.lower() != "yes":
+            print("Live trading cancelled.")
+            return
 
     # Create broker (which includes its own data source)
     broker = create_broker_for_live()
@@ -1449,6 +1626,97 @@ def run_live(args):
     print("")
     # ========================================================================
 
+    # ========================================================================
+    # BRACKET ORDER MANAGER SETUP (Phase 2: REST-based orphan cleanup)
+    # ========================================================================
+    # BracketOrderManager provides safety-net orphan cleanup via REST polling
+    # This complements the broker-level streaming-based bracket handling
+    # Must be created BEFORE PortfolioManager for race-safe close pattern
+    bracket_manager = None
+    try:
+        from tools.bracket_order_manager import BracketOrderManager
+
+        # Ensure broker is connected (sets account_id)
+        if hasattr(broker, "connect") and not broker.account_id:
+            broker.connect()
+
+        # Access the underlying ProjectX client and account_id from broker
+        if hasattr(broker, "client") and broker.account_id:
+            bracket_manager = BracketOrderManager(
+                client=broker.client,
+                account_id=broker.account_id,
+            )
+            # Wire bracket_manager to broker so bracket children get registered
+            broker.bracket_manager = bracket_manager
+
+            # CRITICAL: Cancel all stale BRK_* orders from previous runs
+            # This prevents "tag already in use" errors
+            cleanup_result = bracket_manager.startup_cleanup()
+            if cleanup_result["cancelled"] > 0:
+                print(
+                    TF.warning(
+                        f"⚠️  Startup cleanup: cancelled {cleanup_result['cancelled']} stale bracket orders\n"
+                        "  These were orphaned from previous bot runs"
+                    )
+                )
+
+            print(
+                TF.success(
+                    "✓ BracketOrderManager initialized\n"
+                    "  Startup cleanup complete\n"
+                    "  Stateless orphan cleanup enabled (REST polling)\n"
+                    "  Race-safe close pattern enabled"
+                )
+            )
+        else:
+            print(
+                TF.warning(
+                    "⚠️  BracketOrderManager not initialized\n"
+                    "  Broker does not expose client/account_id\n"
+                    "  Relying on broker-level bracket handling only"
+                )
+            )
+    except ImportError as e:
+        print(
+            TF.warning(f"⚠️  BracketOrderManager import failed: {e}\n" "  Relying on broker-level bracket handling only")
+        )
+    print("")
+    # ========================================================================
+
+    # ========================================================================
+    # ORDER REGISTRY SETUP (Bulletproof Order Management)
+    # ========================================================================
+    # OrderRegistry provides centralized order tracking with:
+    # - Unique tags (timestamp + UUID) to prevent duplicate tag errors
+    # - Position sync checks to prevent double-close race conditions
+    # - Central registration of all orders from creation to fill
+    order_registry = None
+    try:
+        from tools.order_registry import OrderRegistry
+
+        order_registry = OrderRegistry()
+
+        # Wire to broker (for order submission registration)
+        if broker:
+            broker.order_registry = order_registry
+
+        # Wire to bracket_manager (for emergency close and bracket recreation)
+        if bracket_manager:
+            bracket_manager.order_registry = order_registry
+
+        print(
+            TF.success(
+                "✓ OrderRegistry initialized\n"
+                "  Unique tags enabled (timestamp + UUID)\n"
+                "  Position sync checks enabled\n"
+                "  Central order tracking active"
+            )
+        )
+    except ImportError as e:
+        print(TF.warning(f"⚠️  OrderRegistry import failed: {e}\n" "  Using legacy order tracking"))
+    print("")
+    # ========================================================================
+
     # Create portfolio manager
     portfolio_manager = PortfolioManager(
         strategies_folder="custom_portfolio/strategies/active_strategies",
@@ -1462,14 +1730,69 @@ def run_live(args):
         enable_snapshots=enable_snapshots,
         max_snapshots=max_snapshots,
         timestep=timestep,
-        simulate_fills=simulate_fills,
+        simulate_fills=dry_run_mode,  # In live mode: dry_run_mode=True means simulate, False means real orders
         shared_initial_capital=shared_initial_capital,
         deep_portfolio_debug=deep_portfolio_debug,
         ignore_calendar=False,  # ALWAYS enforce calendar in live mode (TopStepX compliance)
+        bracket_manager=bracket_manager,  # For race-safe close pattern
+        order_registry=order_registry,  # For bulletproof order tracking
     )
+
+    # ========================================================================
+    # INJECT STRATEGY STATES INTO BRACKET MANAGER (Phase 11)
+    # ========================================================================
+    # After PortfolioManager creates executor, inject strategy_states reference
+    # This enables fill processing and bracket recreation in poll_cycle()
+    if bracket_manager is not None and portfolio_manager.executor is not None:
+        bracket_manager.strategy_states = portfolio_manager.executor.strategy_states
+
+        # Initialize contract_id for each strategy state (required for bracket orders)
+        # Batch by unique symbols to avoid N+1 queries
+        contract_ids_set = 0
+        if hasattr(broker, "client"):
+            # Get unique symbols that need contract_id resolution
+            symbols_to_resolve = {
+                state.symbol for state in portfolio_manager.executor.strategies if not state.contract_id
+            }
+            # Resolve each unique symbol once
+            symbol_to_contract: dict[str, str] = {}
+            for symbol in symbols_to_resolve:
+                try:
+                    contract_id = broker.client.find_contract_by_symbol(symbol)
+                    if contract_id:
+                        symbol_to_contract[symbol] = contract_id
+                except Exception as e:
+                    print(TF.warning(f"⚠️  Could not resolve contract_id for {symbol}: {e}"))
+
+            # Apply to all strategy states
+            for state in portfolio_manager.executor.strategies:
+                if not state.contract_id and state.symbol in symbol_to_contract:
+                    state.contract_id = symbol_to_contract[state.symbol]
+                    contract_ids_set += 1
+
+        print(
+            TF.success(
+                f"✓ BracketOrderManager linked to {len(bracket_manager.strategy_states)} strategy states\n"
+                f"  Contract IDs resolved: {contract_ids_set}/{len(bracket_manager.strategy_states)}\n"
+                "  Fill processing and bracket recreation enabled"
+            )
+        )
+    # ========================================================================
 
     # Print validation report
     print("\n" + portfolio_manager.get_validation_report())
+
+    # Print dry-run mode status prominently
+    if dry_run_mode:
+        print("")
+        print(TF.warning("=" * 50))
+        print(TF.warning("  DRY-RUN MODE: No real orders will be placed"))
+        print(TF.warning("=" * 50))
+    else:
+        print("")
+        print(TF.success("=" * 50))
+        print(TF.success("  LIVE MODE: Real orders WILL be placed"))
+        print(TF.success("=" * 50))
 
     # Print loaded strategies summary
     summary_df = portfolio_manager.get_loaded_strategies_summary()
@@ -1482,29 +1805,189 @@ def run_live(args):
     print("Press Ctrl+C to stop")
     print("=" * 70 + "\n")
 
+    # ========================================================================
+    # FAST LOOP TRADING PATTERN
+    # ========================================================================
+    # Single fast loop (2s intervals) with minute boundary detection:
+    # - Every tick: poll for bracket orphans
+    # - On new minute: run full trading iteration
+    # - Every N minutes: reconcile exchange vs virtual positions
+    # This ensures we never miss a candle close due to API lag
+    # ========================================================================
+    POLL_INTERVAL_SECONDS = 2
+    # Reconciliation interval configurable via env var (default 5 minutes)
+    reconcile_minutes = int(os.environ.get("RECONCILE_INTERVAL_MINUTES", "5"))
+    RECONCILE_INTERVAL_POLLS = (reconcile_minutes * 60) // POLL_INTERVAL_SECONDS
+    last_iteration_minute = None
+    poll_iteration = 0
+    strategy_iteration = 0
+    last_reconcile_poll = 0
+    last_bracket_scanned = 0  # Track for heartbeat display
+
     # Main trading loop
     try:
-        iteration = 0
         while True:
-            iteration += 1
+            poll_iteration += 1
             current_time = datetime.now()
+            current_minute = current_time.replace(second=0, microsecond=0)
 
-            print(f"\n--- Iteration {iteration} at {current_time} ---")
+            # ================================================================
+            # NEW CANDLE: Run full trading iteration on minute boundary
+            # ================================================================
+            if last_iteration_minute is None or current_minute > last_iteration_minute:
+                strategy_iteration += 1
+                last_iteration_minute = current_minute
 
-            # Run one iteration
-            result = portfolio_manager.run_iteration(current_time)
+                print(
+                    f"\n--- Strategy Iteration {strategy_iteration} at {current_time.strftime('%H:%M:%S')} ---",
+                    flush=True,
+                )
 
-            # Print summary
-            if result and "orders_submitted" in result:
-                print(f"Orders submitted: {result['orders_submitted']}")
+                # Run one trading iteration
+                result = portfolio_manager.run_iteration(current_time)
 
-            # Sleep for 1 minute (or your desired interval)
-            import time
+                # Print summary
+                if result and not result.get("error"):
+                    processed = result.get("strategies_processed", 0)
+                    signals = result.get("signals_generated", 0)
+                    orders = result.get("orders_submitted", 0)
+                    time_exits = result.get("time_exits_triggered", 0)
+                    status_parts = [f"strategies={processed}"]
+                    if signals > 0:
+                        status_parts.append(f"signals={signals}")
+                    if orders > 0:
+                        status_parts.append(f"orders={orders}")
+                    if time_exits > 0:
+                        status_parts.append(f"time_exits={time_exits}")
+                    print(f"  {' | '.join(status_parts)}", flush=True)
 
-            time.sleep(60)
+                    # Print live status table
+                    status_table = portfolio_manager.get_live_status_table()
+                    print(status_table, flush=True)
+
+                    # Print trend sentiment table (cached, refreshes every 5 min)
+                    try:
+                        sentiment_table = get_trend_sentiment_table(["MES", "MNQ", "MGC"])
+                        print(sentiment_table, flush=True)
+                    except Exception as e:
+                        print(f"  (trend sentiment unavailable: {e})", flush=True)
+                elif result and result.get("error"):
+                    print(f"  Error: {result['error']}", flush=True)
+
+            # ================================================================
+            # EVERY TICK: Full bracket poll cycle (fill processing + recreation + orphan cleanup)
+            # ================================================================
+            last_bracket_pairs = 0
+            if bracket_manager is not None:
+                try:
+                    # Build current prices dict for all traded symbols (batch by unique symbols)
+                    current_prices = {}
+                    if portfolio_manager.executor and portfolio_manager.executor.shared_data:
+                        # Get unique symbols to avoid redundant fetches for multiple strategies on same symbol
+                        unique_symbols = {state.symbol for state in portfolio_manager.executor.strategy_states.values()}
+                        for symbol in unique_symbols:
+                            try:
+                                # Use shared_data.get_cached_data() - returns a Bars object with .df property
+                                bars_obj = portfolio_manager.executor.shared_data.get_cached_data(
+                                    symbol,
+                                    portfolio_manager.executor.max_lookback,
+                                    portfolio_manager.executor.timestep,
+                                )
+                                if bars_obj is not None:
+                                    # Bars object has .df attribute; fallback to direct use if it's a DataFrame
+                                    df = bars_obj.df if hasattr(bars_obj, "df") else bars_obj
+                                    if df is not None and len(df) > 0:
+                                        current_prices[symbol] = df["close"].iloc[-1]
+                            except Exception:
+                                pass  # Skip symbols with no cached data yet
+
+                    # Run full poll cycle with calendar gating
+                    poll_result = bracket_manager.poll_cycle(current_prices, calendar)
+
+                    # Update heartbeat tracking
+                    last_bracket_scanned = len(bracket_manager.brackets)
+                    last_bracket_pairs = sum(1 for b in bracket_manager.brackets.values() if b.active)
+
+                    # Log significant events
+                    if poll_result.get("fills_processed"):
+                        for fill in poll_result["fills_processed"]:
+                            print(
+                                f"[BRACKET] Processed {fill['type']} fill: {fill['strategy']} @ {fill['price']}",
+                                flush=True,
+                            )
+
+                    if poll_result.get("brackets_recreated"):
+                        for tag in poll_result["brackets_recreated"]:
+                            print(TF.warning(f"[BRACKET] Recreated missing bracket: {tag}"), flush=True)
+
+                    if poll_result.get("positions_closed"):
+                        for sid in poll_result["positions_closed"]:
+                            print(TF.error(f"[BRACKET] Emergency close triggered: {sid}"), flush=True)
+
+                    if poll_result.get("orphans_cancelled"):
+                        print(
+                            TF.warning(f"[BRACKET] Cleaned up {len(poll_result['orphans_cancelled'])} orphan orders"),
+                            flush=True,
+                        )
+                        for item in poll_result["orphans_cancelled"]:
+                            print(f"  - {item['type']} order {item['order_id']} ({item['reason']})", flush=True)
+
+                except Exception as e:
+                    # Don't crash the loop on bracket manager errors
+                    if poll_iteration % 30 == 1:  # Log every ~60s
+                        print(TF.warning(f"[BRACKET] Poll cycle error (non-fatal): {e}"), flush=True)
+
+            # ================================================================
+            # POSITION RECONCILIATION: Every 5 minutes (150 polls)
+            # ================================================================
+            if poll_iteration - last_reconcile_poll >= RECONCILE_INTERVAL_POLLS:
+                last_reconcile_poll = poll_iteration
+                try:
+                    reconcile_result = portfolio_manager.reconcile_positions()
+                    if reconcile_result.get("error"):
+                        print(TF.warning(f"[RECONCILE] Error: {reconcile_result['error']}"))
+                    elif reconcile_result.get("matched"):
+                        # Only show success message if we have positions to check
+                        exchange_count = len(reconcile_result.get("exchange_positions", {}))
+                        virtual_count = len(reconcile_result.get("virtual_positions", {}))
+                        if exchange_count > 0 or virtual_count > 0:
+                            print(
+                                f"[RECONCILE] Positions matched | "
+                                f"exchange={exchange_count} symbols, virtual={virtual_count} symbols"
+                            )
+                    else:
+                        # Position mismatch detected - this is critical
+                        print(TF.error("[RECONCILE] POSITION MISMATCH DETECTED:"))
+                        for mismatch in reconcile_result.get("mismatches", []):
+                            print(
+                                f"  {mismatch['symbol']}: "
+                                f"exchange={mismatch['exchange_qty']:+.1f} "
+                                f"virtual={mismatch['virtual_qty']:+.1f} "
+                                f"delta={mismatch['delta']:+.1f}"
+                            )
+                except Exception as e:
+                    print(TF.warning(f"[RECONCILE] Reconciliation error (non-fatal): {e}"))
+
+            # ================================================================
+            # HEARTBEAT: Show we're alive (every 15 poll iterations = ~30s)
+            # ================================================================
+            if poll_iteration % 15 == 0:
+                bracket_info = f" bracket_scan={last_bracket_scanned}/{last_bracket_pairs}" if bracket_manager else ""
+                print(
+                    f"[HEARTBEAT] {current_time.strftime('%H:%M:%S')} | "
+                    f"strategy_iter={strategy_iteration} poll_iter={poll_iteration}{bracket_info}",
+                    flush=True,
+                )
+
+            # Sleep until next poll
+            time.sleep(POLL_INTERVAL_SECONDS)
 
     except KeyboardInterrupt:
         print("\n\nLive trading stopped by user.")
+
+        # Print bracket manager stats
+        if bracket_manager is not None:
+            print(f"\nBracket Manager Stats: {bracket_manager.stats}")
 
         # Final performance report
         report = portfolio_manager.get_performance_report()

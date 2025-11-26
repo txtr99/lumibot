@@ -6,6 +6,7 @@ Supports multiple underlying brokers (TSX, TOPONE, etc.) via ProjectX gateway.
 """
 
 # PollingStream usage was removed to align with centralized lifecycle in core Broker
+import time
 from datetime import datetime, timedelta
 from typing import Dict, List
 
@@ -156,6 +157,12 @@ class ProjectX(Broker):
         # Bracket tracking maps (synthetic implementation)
         self._bracket_parent_by_child_id = {}
         self._bracket_meta = {}  # parent_id -> meta dict (persistent across conversions)
+
+        # Optional bracket manager for registering order IDs (set by caller after init)
+        self.bracket_manager = None
+
+        # Optional order registry for bulletproof order tracking (set by caller after init)
+        self.order_registry = None
 
         # Thread management
         self.max_workers = max_workers
@@ -511,6 +518,37 @@ class ProjectX(Broker):
                 # Step 4: Cache for quick lookups (optional optimization)
                 self._orders_cache[order.id] = order
 
+                # Step 4.5: Register with order_registry if available (bulletproof tracking)
+                if self.order_registry and hasattr(order, "tag") and order.tag:
+                    try:
+                        from tools.order_registry import OrderIntent, OrderPurpose
+
+                        # Determine purpose from tag pattern
+                        tag = order.tag
+                        if tag.startswith("ENT_") or tag.startswith("BRK_ENTRY_"):
+                            purpose = OrderPurpose.ENTRY
+                        elif tag.startswith("TP_") or tag.startswith("BRK_TP_"):
+                            purpose = OrderPurpose.TAKE_PROFIT
+                        elif tag.startswith("SL_") or tag.startswith("BRK_STOP_"):
+                            purpose = OrderPurpose.STOP_LOSS
+                        elif tag.startswith("CLOSE_") or tag.startswith("BRK_CLOSE_"):
+                            purpose = OrderPurpose.CLOSE
+                        else:
+                            purpose = OrderPurpose.ENTRY  # Default
+                        is_close = purpose in (OrderPurpose.TAKE_PROFIT, OrderPurpose.STOP_LOSS, OrderPurpose.CLOSE)
+                        intent = OrderIntent(
+                            strategy_id=tag.split("_")[1] if "_" in tag else tag,
+                            symbol=order.asset.symbol if order.asset else "",
+                            side=order.side.upper() if order.side else "BUY",
+                            qty=int(order.quantity) if order.quantity else 1,
+                            purpose=purpose,
+                            is_close=is_close,
+                        )
+                        self.order_registry.register_submission(tag, int(order.id), intent)
+                        self.logger.debug(f"[ORDER_REGISTRY] Registered: {tag} -> order_id={order.id}")
+                    except Exception as reg_err:
+                        self.logger.warning(f"[ORDER_REGISTRY] Failed to register {order.tag}: {reg_err}")
+
                 # Step 5: Process the NEW_ORDER event (moves from unprocessed to new)
                 try:
                     self._process_trade_event(order, self.NEW_ORDER)
@@ -859,45 +897,15 @@ class ProjectX(Broker):
             return []
 
     def _get_contract_id_from_asset(self, asset: Asset) -> str:
-        """Get ProjectX contract ID from Lumibot asset."""
+        """Get ProjectX contract ID from Lumibot asset.
+
+        IMPORTANT: Always use API lookup - contracts change frequently (monthly rolls).
+        Never rely on Asset class generated contracts without API verification.
+        """
         try:
             symbol = asset.symbol
 
-            # Handle continuous futures using Asset class logic
-            if asset.asset_type == Asset.AssetType.CONT_FUTURE:
-                self.logger.debug(f"Converting continuous future {symbol} to specific contract")
-
-                try:
-                    # Use Asset class method to resolve continuous futures
-                    potential_contracts = asset.get_potential_futures_contracts()
-
-                    for contract_symbol in potential_contracts:
-                        # Convert to ProjectX format if needed
-                        if not contract_symbol.startswith("CON.F.US."):
-                            # Parse symbol like "MESU25" -> "CON.F.US.MES.U25"
-                            if len(contract_symbol) >= 4:
-                                base_symbol = contract_symbol[:-3]  # Remove last 3 chars
-                                month_year = contract_symbol[-3:]  # Get month + year code
-                                if len(month_year) == 3:
-                                    month_code = month_year[0]
-                                    year_code = month_year[1:]
-                                    contract_id = f"CON.F.US.{base_symbol}.{month_code}{year_code}"
-                                else:
-                                    contract_id = f"CON.F.US.{symbol}.{month_year}"
-                            else:
-                                contract_id = f"CON.F.US.{symbol}.U25"  # Fallback
-                        else:
-                            contract_id = contract_symbol
-
-                        self.logger.debug(f"✅ Using Asset class contract: {contract_id}")
-                        return contract_id
-
-                except Exception as asset_error:
-                    self.logger.warning(
-                        f"⚠️ Asset class resolution failed, falling back to client method: {asset_error}"
-                    )
-
-            # For non-continuous futures or fallback, use client method
+            # Always use API lookup for active contracts (handles all asset types)
             contract_id = self.client.find_contract_by_symbol(symbol)
 
             if not contract_id:
@@ -1423,44 +1431,115 @@ class ProjectX(Broker):
             self.logger.error(f"[BRACKET SPAWN ERROR] parent={getattr(parent,'id',None)} error={e}")
 
     def _create_bracket_child(self, parent: Order, kind: str, price: float, base_tag: str) -> Order:
-        """Create and submit a single bracket child (tp or sl)."""
-        spec = build_bracket_child_spec(parent, kind, price, base_tag)
-        child = Order(
-            strategy=parent.strategy,
-            asset=parent.asset,
-            quantity=parent.quantity,
-            side=spec["side"],
-            order_type=spec["order_type"],
-            identifier=None,
-        )
-        # Mark as child to bypass bracket detection
-        child._is_bracket_child = True
-        child._bracket_parent_id = parent.id
-        try:
-            from datetime import datetime
+        """Create and submit a single bracket child (tp or sl) with retry on price rejection."""
 
-            child.created_at = datetime.now()
-        except Exception:
-            pass
-        child.tag = spec["tag"]
-        # Attach lightweight meta pointer for diagnostics (not full meta copy to avoid divergence)
-        try:
-            child._synthetic_bracket_child = True
-        except Exception:
-            pass
-        # Assign prices
-        if spec["price_key"] == "limit_price":
-            child.limit_price = spec["price_value"]
-        else:
-            child.stop_price = spec["price_value"]
-        # Submit
-        submitted = self._submit_order(child)
-        if not submitted or not getattr(submitted, "id", None):
-            self.logger.error(f"Bracket child submission failed (kind={kind}) for parent {parent.id}")
-        else:
-            self.logger.debug(
-                f"Bracket child submitted: parent={parent.id} kind={kind} id={submitted.id} price={price}"
+        MAX_RETRIES = 3
+        RETRY_DELAY = 0.2
+        current_price = price
+
+        for attempt in range(MAX_RETRIES):
+            spec = build_bracket_child_spec(parent, kind, current_price, base_tag)
+            child = Order(
+                strategy=parent.strategy,
+                asset=parent.asset,
+                quantity=parent.quantity,
+                side=spec["side"],
+                order_type=spec["order_type"],
+                identifier=None,
             )
+            # Mark as child to bypass bracket detection
+            child._is_bracket_child = True
+            child._bracket_parent_id = parent.id
+            try:
+                from datetime import datetime
+
+                child.created_at = datetime.now()
+            except Exception:
+                pass
+            child.tag = spec["tag"]
+            # Attach lightweight meta pointer for diagnostics (not full meta copy to avoid divergence)
+            try:
+                child._synthetic_bracket_child = True
+            except Exception:
+                pass
+            # Assign prices
+            if spec["price_key"] == "limit_price":
+                child.limit_price = spec["price_value"]
+            else:
+                child.stop_price = spec["price_value"]
+
+            # Submit
+            submitted = self._submit_order(child)
+
+            # Check if successful
+            if submitted and getattr(submitted, "id", None):
+                self.logger.debug(
+                    f"Bracket child submitted: parent={parent.id} kind={kind} id={submitted.id} price={current_price}"
+                )
+                # Register order ID with bracket manager if available
+                if self.bracket_manager is not None:
+                    self.bracket_manager.register_our_order(submitted.id)
+                return submitted
+
+            # Check for price rejection error (errorCode 2: "outside allowed range")
+            error = getattr(submitted, "error", "") or ""
+            error_lower = error.lower()
+            is_price_error = (
+                "price" in error_lower or "range" in error_lower or "outside" in error_lower or "invalid" in error_lower
+            )
+
+            if not is_price_error or attempt >= MAX_RETRIES - 1:
+                # Not a price error or exhausted retries
+                self.logger.error(f"Bracket child submission failed (kind={kind}) for parent {parent.id}: {error}")
+                return submitted
+
+            # ================================================================
+            # PRICE REJECTION RETRY: Adjust price and retry
+            # ================================================================
+            # Get tick size for adjustment
+            try:
+                contract_id = self._get_contract_id_from_asset(parent.asset)
+                tick_size = self.client.get_contract_tick_size(contract_id) if contract_id else 0.25
+            except Exception:
+                tick_size = 0.25  # Default for ES/MES
+
+            # Adjust price toward market (make order more acceptable)
+            # For TP (limit): adjust toward current market price
+            # For SL (stop): adjust toward current market price
+            adjustment = tick_size * 2 * (attempt + 1)  # Increase adjustment on each retry
+
+            if kind == "tp":
+                # TP is a limit order - if rejected, price might be too far from market
+                # Adjust toward entry (more conservative target)
+                if parent.side.lower() == "buy":
+                    # Long TP: lower the target
+                    current_price = price - adjustment
+                else:
+                    # Short TP: raise the target
+                    current_price = price + adjustment
+            else:  # sl
+                # SL is a stop order - if rejected, price might be too far from market
+                # Adjust toward entry (tighter stop)
+                if parent.side.lower() == "buy":
+                    # Long SL: raise the stop (tighter)
+                    current_price = price + adjustment
+                else:
+                    # Short SL: lower the stop (tighter)
+                    current_price = price - adjustment
+
+            # Round to tick
+            try:
+                current_price = self.client.round_to_tick_size(current_price, tick_size)
+            except Exception:
+                pass
+
+            self.logger.warning(
+                f"[BRACKET RETRY] {kind} price rejected (attempt {attempt + 1}/{MAX_RETRIES}), "
+                f"adjusting from {price:.2f} to {current_price:.2f} for parent {parent.id}"
+            )
+            time.sleep(RETRY_DELAY)
+
+        # Should not reach here, but return last submitted for safety
         return submitted
 
     def _handle_bracket_child_fill(self, child: Order):
@@ -1610,7 +1689,14 @@ class ProjectX(Broker):
                         # Dispatch fill event - pass same order twice since it's the updated version
                         self._dispatch_status_change(order, order)
 
-                        self.logger.debug(f"Trade fill processed for order {order_id}: " f"{fill_size} @ {fill_price}")
+                        # Register fill with order_registry if available
+                        if self.order_registry:
+                            try:
+                                self.order_registry.register_fill(int(order_id), fill_price, fill_size)
+                            except Exception as reg_err:
+                                self.logger.debug(f"[ORDER_REGISTRY] Fill reg failed: {reg_err}")
+
+                        self.logger.debug(f"Trade fill processed for order {order_id}: {fill_size} @ {fill_price}")
                 elif order_id:
                     self.logger.debug(f"Trade for unknown order {order_id} - might be pre-existing")
 

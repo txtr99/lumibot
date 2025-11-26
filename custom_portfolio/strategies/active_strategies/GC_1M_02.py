@@ -33,6 +33,7 @@ STRATEGY_CONFIG = {
     "time_exit": {
         "max_bars": 180,
     },
+    "allowed_sessions": ["24/7"],  # 24/7 market
     "metadata": {
         "strategy_type": "trend_following",
         "direction": "long",
@@ -115,3 +116,15 @@ def generate_signal(state, df):
     if go_short(state, df):
         return "SELL"
     return "HOLD"
+
+
+def get_signal_visibility(state, df):
+    """Return list of (label, is_true) for live status display."""
+    indicators = populate_indicators(df, state.params)
+    adx_threshold = state.params.get("adx_threshold", 30)
+    return [
+        ("KER↓", indicators["ker_current"] < indicators["ker_2ago"]),
+        ("SMA200↑", indicators["sma_200_current"] > indicators["sma_200_3ago"]),
+        (f"ADX>{adx_threshold}", indicators["adx"] > adx_threshold),
+        ("MACD↑", indicators["macd_hist_current"] > indicators["macd_hist_3ago"]),
+    ]

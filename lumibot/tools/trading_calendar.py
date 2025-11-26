@@ -68,6 +68,10 @@ class CalendarStatus:
     close_deadline: Optional[datetime]
     close_countdown_seconds: Optional[int]
 
+    # Order entry cutoff (when can_enter_orders becomes False)
+    stop_orders_deadline: Optional[datetime] = None
+    stop_orders_countdown_seconds: Optional[int] = None
+
 
 class TradingCalendar:
     """
@@ -190,6 +194,9 @@ class TradingCalendar:
         must_close, close_reason = self._must_be_flat(current_dt, allowed_sessions, platform_open)
         close_deadline, close_countdown = self._calculate_close_timing(current_dt, allowed_sessions)
 
+        # Order entry cutoff timing
+        stop_orders_deadline, stop_orders_countdown = self._calculate_stop_orders_timing(current_dt, allowed_sessions)
+
         return CalendarStatus(
             current_time=current_dt,
             symbol=symbol,
@@ -213,6 +220,8 @@ class TradingCalendar:
             close_reason=close_reason,
             close_deadline=close_deadline,
             close_countdown_seconds=close_countdown,
+            stop_orders_deadline=stop_orders_deadline,
+            stop_orders_countdown_seconds=stop_orders_countdown,
         )
 
     def log_status(self, status: CalendarStatus, logger_func: Optional[Callable] = None):
@@ -330,6 +339,11 @@ class TradingCalendar:
         active = []
 
         for session_name in allowed_sessions:
+            # Special case: 24/7 is always active (platform constraints handled separately)
+            if session_name == "24/7":
+                active.append(session_name)
+                continue
+
             if session_name not in self.sessions:
                 continue
 
@@ -386,6 +400,10 @@ class TradingCalendar:
             ):
                 return False, "No new orders (platform)"
 
+        # Special case: 24/7 sessions are always open (platform constraints already checked above)
+        if "24/7" in allowed_sessions:
+            return True, "24/7 open"
+
         # Session-level check
         for session_name in allowed_sessions:
             if session_name not in self.sessions:
@@ -425,6 +443,11 @@ class TradingCalendar:
             and current_time_str < self.platform_config["daily_resume"]
         ):
             return True, "Platform maintenance"
+
+        # Special case: 24/7 sessions have no session-level force flat
+        # Only platform-level constraints apply (checked above)
+        if "24/7" in allowed_sessions:
+            return False, "24/7 session"
 
         # Check if we're in any allowed session
         active = self._get_current_session(current_dt, allowed_sessions)
@@ -521,6 +544,11 @@ class TradingCalendar:
         """Calculate session next event, countdown, and progress."""
         current_time_str = current_dt.strftime("%H:%M")
 
+        # Special case: 24/7 sessions have no session-level timing
+        # Return None to indicate no session-level countdown (platform countdown used instead)
+        if "24/7" in allowed_sessions:
+            return None, None, 100.0  # 100% progress = always in session
+
         if not active_sessions:
             # Find next session opening
             next_openings = []
@@ -606,9 +634,20 @@ class TradingCalendar:
         if current_time_str >= self.platform_config["daily_force_flat"]:
             platform_close += timedelta(days=1)
 
+        # Special case: 24/7 sessions only use platform close (no session-level close)
+        if "24/7" in allowed_sessions:
+            countdown = int((platform_close - current_dt).total_seconds())
+            return platform_close, countdown
+
         # Session close times
         session_closes = [platform_close]
         for session_name in self._get_current_session(current_dt, allowed_sessions):
+            if session_name == "24/7":
+                continue  # Skip 24/7, already handled platform close above
+
+            if session_name not in self.sessions:
+                continue
+
             session = self.sessions[session_name]
             session_close = current_dt.replace(
                 hour=int(session["force_flat"].split(":")[0]),
@@ -629,6 +668,58 @@ class TradingCalendar:
         countdown = int((earliest_close - current_dt).total_seconds())
 
         return earliest_close, countdown
+
+    def _calculate_stop_orders_timing(
+        self, current_dt: datetime, allowed_sessions: List[str]
+    ) -> tuple[Optional[datetime], Optional[int]]:
+        """Calculate when new order entry will be blocked (stop_new_orders cutoff)."""
+        current_time_str = current_dt.strftime("%H:%M")
+
+        # Platform stop_new_orders time
+        platform_stop = current_dt.replace(
+            hour=int(self.platform_config["daily_stop_new_orders"].split(":")[0]),
+            minute=int(self.platform_config["daily_stop_new_orders"].split(":")[1]),
+            second=0,
+            microsecond=0,
+        )
+
+        if current_time_str >= self.platform_config["daily_stop_new_orders"]:
+            platform_stop += timedelta(days=1)
+
+        # Special case: 24/7 sessions only use platform stop (no session-level stop)
+        if "24/7" in allowed_sessions:
+            countdown = int((platform_stop - current_dt).total_seconds())
+            return platform_stop, countdown
+
+        # Session stop_new_orders times
+        session_stops = [platform_stop]
+        for session_name in self._get_current_session(current_dt, allowed_sessions):
+            if session_name == "24/7":
+                continue
+
+            if session_name not in self.sessions:
+                continue
+
+            session = self.sessions[session_name]
+            session_stop = current_dt.replace(
+                hour=int(session["stop_new_orders"].split(":")[0]),
+                minute=int(session["stop_new_orders"].split(":")[1]),
+                second=0,
+                microsecond=0,
+            )
+
+            if session["start"] > session["stop_new_orders"] and current_time_str < session["stop_new_orders"]:
+                # Already in the next day part of midnight-crossing session
+                pass
+            elif current_time_str >= session["stop_new_orders"]:
+                session_stop += timedelta(days=1)
+
+            session_stops.append(session_stop)
+
+        earliest_stop = min(session_stops)
+        countdown = int((earliest_stop - current_dt).total_seconds())
+
+        return earliest_stop, countdown
 
     def _format_countdown(self, seconds: Optional[int]) -> str:
         """Format countdown seconds into human-readable string."""

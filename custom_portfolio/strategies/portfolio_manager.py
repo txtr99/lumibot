@@ -95,10 +95,10 @@ TRADING_SESSIONS = {
     },
     "New_York": {
         "name": "New_York",
-        "start": "07:30",  # 7:30 AM CT (CME RTH open)
-        "description": "New York session (CME regular trading hours, closes 2:00 PM CT)",
-        "force_flat": "13:50",  # Force flat at 1:50 PM CT (10 min before 2:00 PM close)
-        "stop_new_orders": "13:45",  # Stop new orders at 1:45 PM CT (15 min before close)
+        "start": "08:30",  # 8:30 AM CT (CME RTH open = 9:30 AM ET)
+        "description": "New York session (CME regular trading hours, closes 3:00 PM CT)",
+        "force_flat": "14:50",  # Force flat at 2:50 PM CT (10 min before 3:00 PM close)
+        "stop_new_orders": "14:30",  # Stop new orders at 2:30 PM CT (30 min before close)
     },
 }
 
@@ -267,6 +267,10 @@ class StrategyLoader:
         # Standardized internal key for signal generation
         config["_generate_signal_func"] = module.generate_signal
 
+        # Optional: signal visibility function for live status display
+        if hasattr(module, "get_signal_visibility"):
+            config["_get_signal_visibility_func"] = module.get_signal_visibility
+
         # Add module reference for reloading
         config["_module"] = module
 
@@ -314,6 +318,8 @@ class PortfolioManager:
         ignore_calendar: bool = False,
         broker_strategy_name: Optional[str] = None,
         deep_portfolio_debug: bool = False,
+        bracket_manager=None,
+        order_registry=None,
     ):
         """
         Initialize the PortfolioManager.
@@ -330,6 +336,8 @@ class PortfolioManager:
             ignore_calendar: If True, skip calendar/session gating (useful for backtests)
             broker_strategy_name: Optional wrapper strategy name used when submitting real orders
             deep_portfolio_debug: Emit verbose executor logs when True
+            bracket_manager: Optional BracketOrderManager for race-safe close pattern (live mode)
+            order_registry: Optional OrderRegistry for bulletproof order tracking (live mode)
 
         Note:
             Tick sizes are automatically looked up per symbol from futures_metadata
@@ -341,6 +349,8 @@ class PortfolioManager:
         self.calendar = calendar
         self.broker_strategy_name = broker_strategy_name
         self.deep_portfolio_debug = deep_portfolio_debug
+        self.bracket_manager = bracket_manager
+        self.order_registry = order_registry
 
         # Create strategies folder if it doesn't exist
         self.strategies_folder.mkdir(parents=True, exist_ok=True)
@@ -368,6 +378,8 @@ class PortfolioManager:
             "ignore_calendar": ignore_calendar,
             "broker_strategy_name": broker_strategy_name,
             "deep_portfolio_debug": deep_portfolio_debug,
+            "bracket_manager": bracket_manager,
+            "order_registry": order_registry,
         }
 
         # Auto-load strategies if requested
@@ -561,7 +573,10 @@ class PortfolioManager:
 
             # Merge exit config into params
             if "_exit_config" in executor_config:
-                max_bars = executor_config["_exit_config"].get("max_bars_in_trade")
+                # Check both max_bars and max_bars_in_trade for compatibility
+                max_bars = executor_config["_exit_config"].get("max_bars") or executor_config["_exit_config"].get(
+                    "max_bars_in_trade"
+                )
                 if max_bars is not None:
                     executor_config["params"]["max_bars"] = max_bars
 
@@ -603,6 +618,11 @@ class PortfolioManager:
                             f"consider updating to _generate_signal_func."
                         )
                     strategy_state.generate_signal_func = sig_func
+
+                # Inject signal visibility function if available
+                vis_func = config.get("_get_signal_visibility_func")
+                if vis_func:
+                    strategy_state.get_signal_visibility_func = vis_func
 
     def run_iteration(self, current_time: datetime = None) -> Dict[str, Any]:
         """
@@ -865,6 +885,12 @@ class PortfolioManager:
             return self.executor.get_performance_report()
         return None
 
+    def get_live_status_table(self) -> str:
+        """Get live status table for all strategies."""
+        if self.executor:
+            return self.executor.get_live_status_table()
+        return "No executor available"
+
     def export_snapshots(self, folder: Path) -> Optional[Path]:
         """
         Export per-bar snapshots and equity curve to CSV if enabled and available.
@@ -995,3 +1021,120 @@ class PortfolioManager:
 
         safe = re.sub(r"[^A-Za-z0-9_]+", "_", stem).strip("_")
         return safe or stem
+
+    def reconcile_positions(self) -> Dict[str, Any]:
+        """
+        Compare exchange positions with aggregated virtual positions across all strategies.
+
+        This method provides a safety check to detect drift between what the broker
+        reports and what our virtual position trackers believe. Mismatches can occur
+        due to:
+        - Manual trades on the broker platform
+        - Fill notifications missed by the system
+        - System restarts losing in-memory state
+        - Race conditions during order execution
+
+        Returns:
+            Dictionary with reconciliation results:
+            {
+                "timestamp": datetime,
+                "exchange_positions": {symbol: qty, ...},
+                "virtual_positions": {symbol: qty, ...},
+                "mismatches": [
+                    {"symbol": str, "exchange_qty": float, "virtual_qty": float, "delta": float},
+                    ...
+                ],
+                "matched": bool,  # True if all positions match
+                "error": str or None,  # Error message if reconciliation failed
+            }
+        """
+        result = {
+            "timestamp": datetime.now(),
+            "exchange_positions": {},
+            "virtual_positions": {},
+            "mismatches": [],
+            "matched": True,
+            "error": None,
+        }
+
+        # Check if we have broker and executor
+        if self.broker is None:
+            result["error"] = "No broker configured - cannot query exchange positions"
+            result["matched"] = False
+            return result
+
+        if self.executor is None:
+            result["error"] = "No executor configured - cannot aggregate virtual positions"
+            result["matched"] = False
+            return result
+
+        # Get exchange positions from broker
+        try:
+            # Use the broker's internal method to get all positions
+            if hasattr(self.broker, "_get_positions_at_broker"):
+                broker_positions = self.broker._get_positions_at_broker()
+            elif hasattr(self.broker, "get_positions"):
+                broker_positions = self.broker.get_positions()
+            else:
+                result["error"] = "Broker does not support position queries"
+                result["matched"] = False
+                return result
+
+            # Aggregate exchange positions by symbol
+            for pos in broker_positions:
+                if pos is None:
+                    continue
+                symbol = pos.asset.symbol if hasattr(pos, "asset") else str(pos)
+                qty = pos.quantity if hasattr(pos, "quantity") else 0.0
+                result["exchange_positions"][symbol] = result["exchange_positions"].get(symbol, 0.0) + qty
+
+        except Exception as e:
+            result["error"] = f"Failed to query exchange positions: {e}"
+            result["matched"] = False
+            return result
+
+        # Aggregate virtual positions from all strategies
+        try:
+            for strategy_state in self.executor.strategies:
+                symbol = strategy_state.symbol
+                pos = strategy_state.tracker.get_position(symbol)
+                qty = pos.quantity if pos else 0.0
+                result["virtual_positions"][symbol] = result["virtual_positions"].get(symbol, 0.0) + qty
+        except Exception as e:
+            result["error"] = f"Failed to aggregate virtual positions: {e}"
+            result["matched"] = False
+            return result
+
+        # Compare positions and find mismatches
+        all_symbols = set(result["exchange_positions"].keys()) | set(result["virtual_positions"].keys())
+
+        for symbol in all_symbols:
+            exchange_qty = result["exchange_positions"].get(symbol, 0.0)
+            virtual_qty = result["virtual_positions"].get(symbol, 0.0)
+
+            # Use small tolerance for floating point comparison
+            delta = exchange_qty - virtual_qty
+            if abs(delta) > 0.001:  # Tolerance for floating point
+                result["mismatches"].append(
+                    {
+                        "symbol": symbol,
+                        "exchange_qty": exchange_qty,
+                        "virtual_qty": virtual_qty,
+                        "delta": delta,
+                    }
+                )
+                result["matched"] = False
+
+        # Log results
+        if result["matched"]:
+            self.logger.debug(f"[RECONCILE] Positions matched: {len(all_symbols)} symbols checked")
+        else:
+            for mismatch in result["mismatches"]:
+                self.logger.warning(
+                    f"[RECONCILE] MISMATCH {mismatch['symbol']}: "
+                    f"exchange={mismatch['exchange_qty']:+.1f} "
+                    f"virtual={mismatch['virtual_qty']:+.1f} "
+                    f"delta={mismatch['delta']:+.1f}"
+                )
+
+        return result

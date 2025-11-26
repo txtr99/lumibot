@@ -33,6 +33,7 @@ STRATEGY_CONFIG = {
     "time_exit": {
         "max_bars": 180,
     },
+    "allowed_sessions": ["24/7"],  # 24/7 market
     "metadata": {
         "strategy_type": "mean_reversion",
         "direction": "long",
@@ -110,3 +111,14 @@ def generate_signal(state, df):
     if go_short(state, df):
         return "SELL"
     return "HOLD"
+
+
+def get_signal_visibility(state, df):
+    """Return list of (label, is_true) for live status display."""
+    indicators = populate_indicators(df, state.params)
+    return [
+        ("C>EMA10", indicators["close"] > indicators["ema_10"]),
+        ("RSI≥70", indicators["rsi"] >= 70),
+        ("Stoch≥70", indicators["stoch"] >= 70),
+        ("Mom↓", indicators["mom_current"] < indicators["mom_5ago"]),
+    ]

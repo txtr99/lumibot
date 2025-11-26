@@ -74,11 +74,25 @@ class EnhancedStrategyState(StrategyState):
         self.last_atr: Optional[float] = None
         self.last_atr_time: Optional[datetime] = None
 
+        # Signal visibility: list of (label, is_true) tuples for display
+        # Set by get_signal_visibility() function in strategy file
+        self.signal_visibility: List[tuple] = []
+
+        # Data status: tracks if strategy has enough bars for evaluation
+        # "ok" = enough data, "ERR" = insufficient bars
+        self.data_status: str = "ok"
+        self.data_bar_count: int = 0
+        self.min_bars_required: int = 0  # Computed from indicator params
+
         # Simple realized P&L tracking and trade counts (per fill)
         self.realized_pnl: float = 0.0
         self.trade_count: int = 0
         self.total_fees_paid: float = 0.0
         self.fees_since_entry: float = 0.0
+
+        # Contract ID for ProjectX API (e.g., "CON.F.US.EP.Z25")
+        # Set during strategy loading from futures_metadata
+        self.contract_id: str = ""
 
 
 class MultiStrategyExecutorEnhanced:
@@ -192,6 +206,8 @@ class MultiStrategyExecutorEnhanced:
         ignore_calendar: bool = False,
         broker_strategy_name: Optional[str] = None,
         deep_portfolio_debug: bool = False,
+        bracket_manager=None,
+        order_registry=None,
     ):
         """
         Initialize the enhanced MultiStrategyExecutor.
@@ -207,6 +223,7 @@ class MultiStrategyExecutorEnhanced:
             ignore_calendar: If True, skip calendar/session gating (useful for backtests)
             broker_strategy_name: Optional wrapper strategy name to tag real broker orders
             deep_portfolio_debug: Emit verbose per-iteration logs when True
+            order_registry: OrderRegistry instance for centralized order tracking
 
         Note:
             Tick sizes are now automatically looked up per symbol from futures_metadata
@@ -217,6 +234,9 @@ class MultiStrategyExecutorEnhanced:
         self.default_atr_period = default_atr_period
         self.MIN_LOOKBACK_FLOOR = 100
         self.MAX_LOOKBACK_CAP = 400
+        # Extra minutes to request beyond max_lookback to account for unfillable gaps
+        # (e.g., 61-min daily maintenance window that can't be forward-filled)
+        self.FETCH_BUFFER_MINUTES = 75
         self.timestep = timestep
 
         # Initialize shared resources
@@ -227,8 +247,9 @@ class MultiStrategyExecutorEnhanced:
         self.ignore_calendar = ignore_calendar
         self.broker_strategy_name = broker_strategy_name
         self.deep_portfolio_debug = deep_portfolio_debug
+        self.bracket_manager = bracket_manager  # For race-safe close pattern
+        self.order_registry = order_registry  # For bulletproof order tracking
         self.total_initial_capital = shared_initial_capital
-        self.min_bars = 90  # TEMPORARY: reduced for testing (was 300)
 
         # Dictionary to hold loaded strategy modules for dynamic loading
         self.strategy_modules = {}
@@ -249,7 +270,7 @@ class MultiStrategyExecutorEnhanced:
                 symbol=config["symbol"],
                 params=config["params"],
                 contracts=config.get("contracts", 1),
-                allowed_sessions=config.get("allowed_sessions", ["New_York"]),
+                allowed_sessions=config.get("allowed_sessions", ["24/7"]),
             )
 
             # Store strategy type for dynamic loading
@@ -260,19 +281,52 @@ class MultiStrategyExecutorEnhanced:
             # Register with attribution tracker
             self.attribution.register_strategy(config["strategy_id"], initial_capital=per_strategy_capital)
 
-            # Track required lookback (include common indicators)
+            # Calculate min_bars_required from ALL indicator params
+            # This ensures each strategy gets enough data for its indicators
             p = state.params
+            indicator_periods = []
+            for key, value in p.items():
+                # Check all params that represent indicator periods/lengths
+                if any(suffix in key.lower() for suffix in ["_length", "_period", "lookback"]):
+                    try:
+                        indicator_periods.append(int(value))
+                    except (ValueError, TypeError):
+                        pass
+                # Also check common param names without suffixes
+                if key.lower() in [
+                    "sma_fast",
+                    "sma_slow",
+                    "ema_fast",
+                    "ema_slow",
+                    "ema_medium",
+                    "ema_medium_fast",
+                    "rsi_fast",
+                    "rsi_slow",
+                ]:
+                    try:
+                        indicator_periods.append(int(value))
+                    except (ValueError, TypeError):
+                        pass
+
+            # Add buffer: longest indicator period + 50 bars for calculations/warmup
+            max_period = max(indicator_periods) if indicator_periods else 20
+            state.min_bars_required = max_period + 50
+
+            # Track max lookback across all strategies for data fetching
             required = max(
                 int(p.get("atr_period", self.default_atr_period)) + 10,
-                int(p.get("rsi_period", 0)) + 2,
-                int(p.get("sma_period", 0)) + 2,
-                int(p.get("lookback", 0)),
+                state.min_bars_required,
                 1,
             )
             self.max_lookback = max(self.max_lookback, required)
 
         # Cap lookback to 400 bars as requested; ensure minimum 100 for stability
         self.max_lookback = min(self.MAX_LOOKBACK_CAP, max(self.max_lookback, self.MIN_LOOKBACK_FLOOR))
+
+        # Add buffer for unfillable gaps (maintenance windows) to ensure we get enough bars
+        # This is added AFTER capping because the cap is for indicator requirements,
+        # but the buffer is for data availability during market closures
+        self.max_lookback = self.max_lookback + self.FETCH_BUFFER_MINUTES
 
         # Snapshot toggles
         self.enable_snapshots = enable_snapshots
@@ -595,6 +649,10 @@ class MultiStrategyExecutorEnhanced:
         symbols = list(set(strategy.symbol for strategy in self.strategies))
         self.logger.debug(f"Fetching data for {len(symbols)} unique symbols: {symbols}")
 
+        # Invalidate cache at start of each iteration to ensure fresh data
+        # Cache still serves its purpose: sharing data across strategies WITHIN this iteration
+        self.shared_data.invalidate_cache()
+
         # Fetch with enough history for ATR calculations
         self._log_verbose(
             f"{_YELLOW}[FETCH] start symbols={symbols} length={self.max_lookback} timestep={self.timestep}{_RESET}"
@@ -671,8 +729,38 @@ class MultiStrategyExecutorEnhanced:
                 if virtual_qty != 0:
                     strategy_state.bars_in_trade += 1
 
+                # Track data status for visibility (using per-strategy minimum)
+                strategy_state.data_bar_count = len(df)
+                min_required = strategy_state.min_bars_required
+                if len(df) < min_required:
+                    strategy_state.data_status = "ERR"
+                else:
+                    strategy_state.data_status = "ok"
+
+                # Update signal visibility for ALL strategies (even those in positions)
+                # This must run before any early exits so display always shows current indicators
+                vis_func = getattr(strategy_state, "get_signal_visibility_func", None)
+                if callable(vis_func) and len(df) >= min_required:
+                    try:
+                        vis_result = vis_func(strategy_state, df)
+                        # Check for NaN values in visibility results
+                        has_nan = False
+                        if vis_result:
+                            for _, val in vis_result:
+                                if val is None or (isinstance(val, float) and pd.isna(val)):
+                                    has_nan = True
+                                    break
+                        if has_nan:
+                            strategy_state.data_status = "NaN"
+                            self.logger.warning(f"Signal visibility has NaN for {strategy_state.strategy_id}")
+                        strategy_state.signal_visibility = vis_result or []
+                    except Exception as e:
+                        self.logger.warning(f"Signal visibility failed for {strategy_state.strategy_id}: {e}")
+                        strategy_state.data_status = "ERR"
+                        strategy_state.signal_visibility = []
+
                 # If flat and not enough history, skip new entries (still allow exits if position exists)
-                if virtual_qty == 0 and len(df) < self.min_bars:
+                if virtual_qty == 0 and len(df) < min_required:
                     continue
 
                 # 2b. If already in position, first check for bracket hits
@@ -865,9 +953,16 @@ class MultiStrategyExecutorEnhanced:
         sig_func = getattr(strategy_state, "generate_signal_func", None)
         if callable(sig_func):
             try:
-                return sig_func(strategy_state, market_data)
+                signal = sig_func(strategy_state, market_data)
+                # Check for NaN or invalid signal
+                if signal is None or (isinstance(signal, float) and pd.isna(signal)):
+                    self.logger.warning(f"Signal is NaN/None for {strategy_state.strategy_id}")
+                    strategy_state.data_status = "NaN"
+                    return "HOLD"
+                return signal
             except Exception as e:
                 self.logger.error(f"Signal function failed for {strategy_state.strategy_id}: {e}", exc_info=True)
+                strategy_state.data_status = "ERR"
                 return "HOLD"
 
         # Fallback: HOLD if no function injected
@@ -916,15 +1011,21 @@ class MultiStrategyExecutorEnhanced:
                 secondary_limit_price=tp_price,  # Take profit
                 secondary_stop_price=sl_price,  # Stop loss
             )
-            order.tag = strategy_state.strategy_id
-            # TEMPORARILY COMMENTED OUT - testing if this causes ProjectX order submission errors
-            # if self.broker_strategy_name:
-            #     order.strategy = self.broker_strategy_name
+            # Generate unique tag using registry (timestamp + UUID for true uniqueness)
+            if self.order_registry:
+                from tools.order_registry import OrderPurpose
+
+                order.tag = self.order_registry.generate_unique_tag(OrderPurpose.ENTRY, strategy_state.strategy_id)
+            else:
+                # Fallback to old format if no registry (backward compatibility)
+                import uuid
+
+                order.tag = f"{strategy_state.strategy_id}-{uuid.uuid4().hex[:8].upper()}"
 
             self._log_verbose(
                 f"Created bracket order for {strategy_state.strategy_id}: "
                 f"{side} {strategy_state.contracts} {asset.symbol}, "
-                f"TP={tp_price}, SL={sl_price}"
+                f"TP={tp_price}, SL={sl_price}, tag={order.tag}"
             )
 
             return order
@@ -960,10 +1061,16 @@ class MultiStrategyExecutorEnhanced:
             else:
                 return None
 
-            order.tag = strategy_state.strategy_id
-            # TEMPORARILY COMMENTED OUT - testing if this causes ProjectX order submission errors
-            # if self.broker_strategy_name:
-            #     order.strategy = self.broker_strategy_name
+            # Generate unique tag using registry (timestamp + UUID for true uniqueness)
+            if self.order_registry:
+                from tools.order_registry import OrderPurpose
+
+                order.tag = self.order_registry.generate_unique_tag(OrderPurpose.CLOSE, strategy_state.strategy_id)
+            else:
+                # Fallback to old format if no registry (backward compatibility)
+                import uuid
+
+                order.tag = f"{strategy_state.strategy_id}-{uuid.uuid4().hex[:8].upper()}"
 
             return order
 
@@ -1013,22 +1120,75 @@ class MultiStrategyExecutorEnhanced:
                 # Submit order to broker unless simulating fills or broker missing
                 mark_submitted = False
                 if not self.simulate_fills and self.broker is not None:
+                    # ============================================================
+                    # RACE-SAFE CLOSE: Cancel brackets BEFORE closing position
+                    # ============================================================
+                    # If this is a close order and we have a bracket_manager,
+                    # cancel any open TP/SL orders first to prevent orphans
+                    if is_close and self.bracket_manager is not None:
+                        try:
+                            cancel_result = self.bracket_manager.cancel_brackets_for_strategy(
+                                strategy_state.strategy_id,
+                                wait_seconds=0.5,
+                            )
+                            if cancel_result.get("cancelled"):
+                                self._log_verbose(
+                                    f"[RACE-SAFE] Cancelled {len(cancel_result['cancelled'])} "
+                                    f"brackets before closing {strategy_state.strategy_id}"
+                                )
+                            if cancel_result.get("errors"):
+                                self.logger.warning(
+                                    f"[RACE-SAFE] Errors cancelling brackets for "
+                                    f"{strategy_state.strategy_id}: {cancel_result['errors']}"
+                                )
+                        except Exception as cancel_err:
+                            # Log but don't block the close - better to close with potential
+                            # orphan than to leave position open
+                            self.logger.warning(
+                                f"[RACE-SAFE] Failed to cancel brackets for "
+                                f"{strategy_state.strategy_id}: {cancel_err}"
+                            )
+                    # ============================================================
+
                     self._log_verbose(
                         f"Submitting order for {strategy_state.strategy_id} ({reason}): "
-                        f"{order.side} {order.quantity} {order.asset.symbol}"
+                        f"{order.side} {order.quantity} {order.asset.symbol}, tag={order.tag}"
                     )
                     try:
                         self.broker.submit_order(order)
                         mark_submitted = True
+                        # Register order ID with bracket manager so we track its fill
+                        if self.bracket_manager is not None and hasattr(order, "id") and order.id:
+                            self.bracket_manager.register_our_order(order.id)
+                        # Register with order registry for bulletproof tracking
+                        if self.order_registry and hasattr(order, "id") and order.id:
+                            from tools.order_registry import OrderIntent, OrderPurpose
+
+                            purpose = OrderPurpose.CLOSE if is_close else OrderPurpose.ENTRY
+                            intent = OrderIntent(
+                                strategy_id=strategy_state.strategy_id,
+                                symbol=strategy_state.symbol,
+                                side=order.side.upper(),
+                                qty=int(order.quantity),
+                                purpose=purpose,
+                                is_close=is_close,
+                            )
+                            self.order_registry.register_submission(order.tag, order.id, intent)
                     except Exception as submit_err:
+                        # Print to console for visibility (errors should NEVER be silent)
+                        print(
+                            f"\033[91m❌ ORDER FAILED: {strategy_state.strategy_id} "
+                            f"{order.side} {order.quantity} {order.asset.symbol}: {submit_err}\033[0m",
+                            flush=True,
+                        )
                         self.logger.error(
                             f"Broker submit failed for {strategy_state.strategy_id}: {submit_err}", exc_info=True
                         )
                 else:
-                    # Simulated path just logs
-                    self.logger.debug(
-                        f"Simulated submit for {strategy_state.strategy_id} ({reason}): "
-                        f"{order.side} {order.quantity} {order.asset.symbol}"
+                    # Dry-run / simulated path - log clearly that order is NOT being sent
+                    self.logger.info(
+                        f"[DRY-RUN] Simulated {order.side} {order.quantity} {order.asset.symbol} "
+                        f"for {strategy_state.strategy_id} ({reason}) - NOT submitted to exchange"
                     )
                     mark_submitted = True
                 if mark_submitted:
@@ -1040,166 +1200,167 @@ class MultiStrategyExecutorEnhanced:
                         strategy_state.symbol, self.max_lookback, self.timestep
                     )
 
-                if market_data is not None:
-                    if hasattr(market_data, "df"):
-                        df = market_data.df
-                    else:
-                        df = market_data
-
-                    if df is None:
-                        self.logger.warning(
-                            f"No market data frame for {strategy_state.strategy_id}; skipping fill update."
-                        )
-                        continue
-
-                    if len(df) == 0:
-                        self.logger.warning(
-                            f"Empty market data when executing order for {strategy_state.strategy_id}; "
-                            f"skipping fill update."
-                        )
-                        continue
-
-                    # Pick price at or before current_time (not end-of-period) to avoid future-looking fills
-                    bar_time = None
-                    fill_price = None
-                    try:
-                        idx = df.index
-                        ct = pd.Timestamp(current_time)
-                        if getattr(idx, "tz", None) is not None:
-                            if ct.tzinfo is None:
-                                ct = ct.tz_localize(idx.tz)
-                            elif ct.tzinfo != idx.tz:
-                                ct = ct.tz_convert(idx.tz)
+                    if market_data is not None:
+                        if hasattr(market_data, "df"):
+                            df = market_data.df
                         else:
-                            if ct.tzinfo is not None:
-                                ct = ct.tz_convert(None)
+                            df = market_data
 
-                        pos = idx.searchsorted(ct, side="right")
-                        if pos > 0:
-                            row = df.iloc[pos - 1]
-                            bar_time = getattr(row, "name", ct)
-                            fill_price = float(row["close"])
-                    except Exception:
+                        if df is None:
+                            self.logger.warning(
+                                f"No market data frame for {strategy_state.strategy_id}; skipping fill update."
+                            )
+                            continue
+
+                        if len(df) == 0:
+                            self.logger.warning(
+                                f"Empty market data when executing order for {strategy_state.strategy_id}; "
+                                f"skipping fill update."
+                            )
+                            continue
+
+                        # Pick price at or before current_time (not end-of-period) to avoid future-looking fills
                         bar_time = None
                         fill_price = None
+                        try:
+                            idx = df.index
+                            ct = pd.Timestamp(current_time)
+                            if getattr(idx, "tz", None) is not None:
+                                if ct.tzinfo is None:
+                                    ct = ct.tz_localize(idx.tz)
+                                elif ct.tzinfo != idx.tz:
+                                    ct = ct.tz_convert(idx.tz)
+                            else:
+                                if ct.tzinfo is not None:
+                                    ct = ct.tz_convert(None)
 
-                    if fill_override is not None:
-                        fill_price = float(fill_override)
-                        bar_time = df.index[-1] if len(df.index) > 0 else current_time
-                    if fill_price is None:
-                        # Fallback: use last bar in the frame
-                        fill_price = float(df["close"].iloc[-1])
-                        bar_time = df.index[-1] if len(df.index) > 0 else current_time
-                    current_price = fill_price
+                            pos = idx.searchsorted(ct, side="right")
+                            if pos > 0:
+                                row = df.iloc[pos - 1]
+                                bar_time = getattr(row, "name", ct)
+                                fill_price = float(row["close"])
+                        except Exception:
+                            bar_time = None
+                            fill_price = None
 
-                    # Simulated virtual fill
-                    strategy_state.tracker.execute_order(
-                        strategy_state.symbol, order.quantity, order.side, current_price
-                    )
+                        if fill_override is not None:
+                            fill_price = float(fill_override)
+                            bar_time = df.index[-1] if len(df.index) > 0 else current_time
+                        if fill_price is None:
+                            # Fallback: use last bar in the frame
+                            fill_price = float(df["close"].iloc[-1])
+                            bar_time = df.index[-1] if len(df.index) > 0 else current_time
+                        current_price = fill_price
 
-                    # Track per-side TopstepX fee (if known)
-                    fee_per_side = get_per_order_fee(strategy_state.symbol) or 0.0
-                    fees_this_order = fee_per_side * abs(order.quantity)
-                    if fees_this_order:
-                        strategy_state.total_fees_paid += fees_this_order
-                        strategy_state.fees_since_entry += fees_this_order
-
-                    # Track entry/exit bookkeeping
-                    pos_after = strategy_state.tracker.get_position(strategy_state.symbol)
-                    qty_after = pos_after.quantity if pos_after else 0.0
-
-                    # Reversal or flattening: close prior position if we had one
-                    if qty_before != 0 and (qty_after == 0 or qty_before * qty_after < 0):
-                        entry_price = (
-                            strategy_state.entry_price if strategy_state.entry_price is not None else current_price
+                        # Simulated virtual fill (use order.tag for idempotency)
+                        order_id = getattr(order, "tag", None)
+                        strategy_state.tracker.execute_order(
+                            strategy_state.symbol, order.quantity, order.side, current_price, order_id=order_id
                         )
-                        multiplier = get_multiplier(strategy_state.symbol)
-                        realized = (current_price - entry_price) * qty_before * multiplier
-                        net_realized = realized - strategy_state.fees_since_entry
-                        strategy_state.realized_pnl += net_realized
-                        self.attribution.record_trade(
-                            strategy_state.strategy_id,
-                            entry_price,
-                            current_price,
-                            qty_before,
-                            timestamp=bar_time,
-                            fees=strategy_state.fees_since_entry,
-                            symbol=strategy_state.symbol,
-                            multiplier=multiplier,
+
+                        # Track per-side TopstepX fee (if known)
+                        fee_per_side = get_per_order_fee(strategy_state.symbol) or 0.0
+                        fees_this_order = fee_per_side * abs(order.quantity)
+                        if fees_this_order:
+                            strategy_state.total_fees_paid += fees_this_order
+                            strategy_state.fees_since_entry += fees_this_order
+
+                        # Track entry/exit bookkeeping
+                        pos_after = strategy_state.tracker.get_position(strategy_state.symbol)
+                        qty_after = pos_after.quantity if pos_after else 0.0
+
+                        # Reversal or flattening: close prior position if we had one
+                        if qty_before != 0 and (qty_after == 0 or qty_before * qty_after < 0):
+                            entry_price = (
+                                strategy_state.entry_price if strategy_state.entry_price is not None else current_price
+                            )
+                            multiplier = get_multiplier(strategy_state.symbol)
+                            realized = (current_price - entry_price) * qty_before * multiplier
+                            net_realized = realized - strategy_state.fees_since_entry
+                            strategy_state.realized_pnl += net_realized
+                            self.attribution.record_trade(
+                                strategy_state.strategy_id,
+                                entry_price,
+                                current_price,
+                                qty_before,
+                                timestamp=bar_time,
+                                fees=strategy_state.fees_since_entry,
+                                symbol=strategy_state.symbol,
+                                multiplier=multiplier,
+                            )
+                            strategy_state.trade_history.append(
+                                {
+                                    "timestamp": bar_time,
+                                    "entry_price": entry_price,
+                                    "exit_price": current_price,
+                                    "quantity": qty_before,
+                                    "pnl": net_realized,
+                                    "fees": strategy_state.fees_since_entry,
+                                }
+                            )
+                            strategy_state.trade_count += 1
+                            # Reset entry tracking after a close/reversal
+                            strategy_state.entry_time = None
+                            strategy_state.entry_price = None
+                            strategy_state.entry_iteration = None
+                            strategy_state.entry_side = None
+                            strategy_state.take_profit_price = None
+                            strategy_state.stop_loss_price = None
+                            strategy_state.bars_in_trade = 0
+                            strategy_state.fees_since_entry = 0.0
+
+                        # New entry (including reversal opening leg)
+                        if (qty_after != 0 and qty_before == 0) or (qty_before * qty_after < 0):
+                            strategy_state.entry_time = bar_time
+                            strategy_state.entry_price = current_price
+                            strategy_state.entry_iteration = self.iteration_count
+                            strategy_state.bars_in_trade = 0
+                            strategy_state.entry_side = order.side
+                            strategy_state.take_profit_price = getattr(strategy_state, "pending_tp", None)
+                            strategy_state.stop_loss_price = getattr(strategy_state, "pending_sl", None)
+                            strategy_state.pending_tp = None
+                            strategy_state.pending_sl = None
+                            strategy_state.fees_since_entry = fees_this_order
+
+                        # If we simply added to existing position, keep original entry but refresh bars
+                        if qty_after != 0 and qty_before == qty_after and qty_after != 0:
+                            strategy_state.bars_in_trade = max(strategy_state.bars_in_trade, 0)
+
+                        self.logger.debug(
+                            f"Updated virtual position for {strategy_state.strategy_id}: "
+                            f"{strategy_state.tracker.get_position(strategy_state.symbol)}"
                         )
-                        strategy_state.trade_history.append(
-                            {
-                                "timestamp": bar_time,
-                                "entry_price": entry_price,
-                                "exit_price": current_price,
-                                "quantity": qty_before,
-                                "pnl": net_realized,
-                                "fees": strategy_state.fees_since_entry,
-                            }
-                        )
-                        strategy_state.trade_count += 1
-                        # Reset entry tracking after a close/reversal
-                        strategy_state.entry_time = None
-                        strategy_state.entry_price = None
-                        strategy_state.entry_iteration = None
-                        strategy_state.entry_side = None
-                        strategy_state.take_profit_price = None
-                        strategy_state.stop_loss_price = None
-                        strategy_state.bars_in_trade = 0
-                        strategy_state.fees_since_entry = 0.0
+                        orders_submitted += 1
+                        self.total_orders_submitted += 1
 
-                    # New entry (including reversal opening leg)
-                    if (qty_after != 0 and qty_before == 0) or (qty_before * qty_after < 0):
-                        strategy_state.entry_time = bar_time
-                        strategy_state.entry_price = current_price
-                        strategy_state.entry_iteration = self.iteration_count
-                        strategy_state.bars_in_trade = 0
-                        strategy_state.entry_side = order.side
-                        strategy_state.take_profit_price = getattr(strategy_state, "pending_tp", None)
-                        strategy_state.stop_loss_price = getattr(strategy_state, "pending_sl", None)
-                        strategy_state.pending_tp = None
-                        strategy_state.pending_sl = None
-                        strategy_state.fees_since_entry = fees_this_order
-
-                    # If we simply added to an existing position, keep the original entry but refresh bars counter
-                    if qty_after != 0 and qty_before == qty_after and qty_after != 0:
-                        strategy_state.bars_in_trade = max(strategy_state.bars_in_trade, 0)
-
-                    self.logger.debug(
-                        f"Updated virtual position for {strategy_state.strategy_id}: "
-                        f"{strategy_state.tracker.get_position(strategy_state.symbol)}"
-                    )
-                    orders_submitted += 1
-                    self.total_orders_submitted += 1
-
-                    # Snapshots for attribution/logging (optional)
-                    if self.enable_snapshots:
-                        pos_obj = strategy_state.tracker.get_position(strategy_state.symbol)
-                        pos_qty = pos_obj.quantity if pos_obj else 0.0
-                        entry_price = strategy_state.entry_price
-                        last_price = current_price
-                        unrealized = (last_price - entry_price) * pos_qty if entry_price is not None else 0.0
-                        self.attribution.record_snapshot(
-                            strategy_state.strategy_id,
-                            {
-                                "timestamp": bar_time,
-                                "symbol": strategy_state.symbol,
-                                "position_qty": pos_qty,
-                                "notional_exposure": pos_qty * last_price,
-                                "last_price": last_price,
-                                "entry_price": entry_price,
-                                "bars_in_trade": strategy_state.bars_in_trade,
-                                "last_signal": getattr(strategy_state, "last_signal", None),
-                                "unrealized_pnl": unrealized,
-                                "realized_pnl": strategy_state.realized_pnl,
-                                "trade_count": strategy_state.trade_count,
-                                "fees_paid": strategy_state.total_fees_paid,
-                                "fees_since_entry": strategy_state.fees_since_entry,
-                            },
-                        )
-                else:
-                    # No data; skip counting as submitted
-                    continue
+                        # Snapshots for attribution/logging (optional)
+                        if self.enable_snapshots:
+                            pos_obj = strategy_state.tracker.get_position(strategy_state.symbol)
+                            pos_qty = pos_obj.quantity if pos_obj else 0.0
+                            entry_price = strategy_state.entry_price
+                            last_price = current_price
+                            unrealized = (last_price - entry_price) * pos_qty if entry_price is not None else 0.0
+                            self.attribution.record_snapshot(
+                                strategy_state.strategy_id,
+                                {
+                                    "timestamp": bar_time,
+                                    "symbol": strategy_state.symbol,
+                                    "position_qty": pos_qty,
+                                    "notional_exposure": pos_qty * last_price,
+                                    "last_price": last_price,
+                                    "entry_price": entry_price,
+                                    "bars_in_trade": strategy_state.bars_in_trade,
+                                    "last_signal": getattr(strategy_state, "last_signal", None),
+                                    "unrealized_pnl": unrealized,
+                                    "realized_pnl": strategy_state.realized_pnl,
+                                    "trade_count": strategy_state.trade_count,
+                                    "fees_paid": strategy_state.total_fees_paid,
+                                    "fees_since_entry": strategy_state.fees_since_entry,
+                                },
+                            )
+                    else:
+                        # No data; skip counting as submitted
+                        continue
 
             except Exception as e:
                 self.logger.error(f"Failed to execute order for {strategy_state.strategy_id}: {e}", exc_info=True)
@@ -1218,6 +1379,14 @@ class MultiStrategyExecutorEnhanced:
         """Get list of all strategy states."""
         return self.strategies
 
+    @property
+    def strategy_states(self) -> Dict[str, "EnhancedStrategyState"]:
+        """Get strategy states as dict keyed by strategy_id.
+
+        Used by BracketOrderManager for fill processing and bracket recreation.
+        """
+        return {s.strategy_id: s for s in self.strategies}
+
     def get_performance_report(self) -> Any:
         """Generate comprehensive performance report for all strategies."""
         return self.attribution.generate_report()
@@ -1234,6 +1403,297 @@ class MultiStrategyExecutorEnhanced:
             "best_strategy": self.attribution.get_best_strategy(),
             "worst_strategy": self.attribution.get_worst_strategy(),
         }
+
+    def get_live_status_table(self) -> str:
+        """
+        Generate a live status table for all strategies with color coding.
+
+        Columns:
+        - symbol, strategy_id, qty (exposure), side, entry_price, current_price
+        - unrealized_pnl, ticks_to_sl, ticks_to_tp, sl_tp_exist, pnl_at_tp, pnl_at_sl
+        - time_held, max_bars, bars_in_trade, last_signal
+
+        Color coding:
+        - Long positions: dark green background
+        - Short positions: dark purple background
+        - Positive P&L: bold green
+        - Negative P&L: red
+        """
+        from custom_portfolio.data.futures_metadata import get_multiplier, get_tick_size
+
+        # ANSI color codes
+        RESET = "\033[0m"
+        RED = "\033[91m"
+        YELLOW = "\033[93m"  # NaN/warning indicator
+        BOLD_GREEN = "\033[1;92m"
+        DIM = "\033[2m"
+        CYAN = "\033[96m"  # Signal visibility TRUE
+        GRAY = "\033[90m"  # Signal visibility FALSE
+        # Background colors for positions
+        BG_DARK_GREEN = "\033[48;5;22m"  # Dark green for long
+        BG_DARK_PURPLE = "\033[48;5;54m"  # Dark purple for short
+
+        rows = []
+        for state in sorted(self.strategies, key=lambda s: (s.symbol, s.strategy_id)):
+            pos = state.tracker.get_position(state.symbol)
+            qty = pos.quantity if pos else 0
+
+            # Get current price from cache
+            current_price = None
+            try:
+                md = self.shared_data.get_cached_data(state.symbol, self.max_lookback, self.timestep)
+                df = md.df if hasattr(md, "df") else md
+                if df is not None and len(df) > 0:
+                    current_price = float(df["close"].iloc[-1])
+            except Exception:
+                pass
+
+            # Calculate values
+            multiplier = get_multiplier(state.symbol)
+            tick_size = get_tick_size(state.symbol)
+
+            # Side and colors
+            if qty > 0:
+                side = "LONG"
+                row_bg = BG_DARK_GREEN
+            elif qty < 0:
+                side = "SHORT"
+                row_bg = BG_DARK_PURPLE
+            else:
+                side = "-"
+                row_bg = ""
+
+            # Entry price
+            entry_price = state.entry_price if state.entry_price else 0
+
+            # Unrealized P&L
+            unrealized_pnl = 0.0
+            if qty != 0 and entry_price and current_price:
+                unrealized_pnl = (current_price - entry_price) * qty * multiplier
+
+            # Format P&L with color
+            if unrealized_pnl > 0:
+                pnl_str = f"{BOLD_GREEN}${unrealized_pnl:+.2f}{RESET}"
+            elif unrealized_pnl < 0:
+                pnl_str = f"{RED}${unrealized_pnl:+.2f}{RESET}"
+            else:
+                pnl_str = f"${unrealized_pnl:.2f}"
+
+            # SL/TP prices and ticks
+            sl_price = state.stop_loss_price
+            tp_price = state.take_profit_price
+            sl_tp_exist = "Y" if (sl_price or tp_price) else "N"
+
+            ticks_to_sl = "-"
+            ticks_to_tp = "-"
+            pnl_at_sl = "-"
+            pnl_at_tp = "-"
+
+            if current_price and tick_size > 0:
+                if sl_price:
+                    ticks_to_sl_val = abs(current_price - sl_price) / tick_size
+                    ticks_to_sl = f"{ticks_to_sl_val:.0f}"
+                    # P&L at SL
+                    if qty != 0:
+                        pnl_at_sl_val = (sl_price - entry_price) * qty * multiplier if entry_price else 0
+                        pnl_at_sl = (
+                            f"{RED}${pnl_at_sl_val:.0f}{RESET}" if pnl_at_sl_val < 0 else f"${pnl_at_sl_val:.0f}"
+                        )
+
+                if tp_price:
+                    ticks_to_tp_val = abs(tp_price - current_price) / tick_size
+                    ticks_to_tp = f"{ticks_to_tp_val:.0f}"
+                    # P&L at TP
+                    if qty != 0:
+                        pnl_at_tp_val = (tp_price - entry_price) * qty * multiplier if entry_price else 0
+                        pnl_at_tp = (
+                            f"{BOLD_GREEN}${pnl_at_tp_val:.0f}{RESET}" if pnl_at_tp_val > 0 else f"${pnl_at_tp_val:.0f}"
+                        )
+
+            # Time held
+            time_held = "-"
+            if state.entry_time and qty != 0:
+                # Use pandas timestamp for timezone compatibility
+                now = pd.Timestamp.now(tz=state.entry_time.tzinfo if hasattr(state.entry_time, "tzinfo") else None)
+                delta = now - state.entry_time
+                minutes = int(delta.total_seconds() / 60)
+                if minutes >= 60:
+                    time_held = f"{minutes // 60}h{minutes % 60}m"
+                else:
+                    time_held = f"{minutes}m"
+
+            # Max bars from params (check multiple locations)
+            max_bars = (
+                state.params.get("max_bars")
+                or state.params.get("max_bars_in_trade")
+                or state.params.get("max_bars_in_position")
+            )
+            # Also check if it was passed in time_exit config
+            if not max_bars and hasattr(state, "time_exit_config"):
+                max_bars = state.time_exit_config.get("max_bars")
+            max_bars_str = str(int(max_bars)) if max_bars else "-"
+
+            # Bars in trade
+            bars_in = state.bars_in_trade if qty != 0 else 0
+
+            # Last signal
+            last_signal = getattr(state, "last_signal", None) or "-"
+
+            # Data status column - shows actual/required bars with color coding
+            data_status = getattr(state, "data_status", "ok")
+            bar_count = getattr(state, "data_bar_count", 0)
+            min_required = getattr(state, "min_bars_required", 0)
+            if data_status == "ok":
+                # Green: sufficient data
+                data_col = f"{CYAN}{bar_count}/{min_required}{RESET}"
+            elif data_status == "NaN":
+                # Yellow: NaN values detected in calculations
+                data_col = f"{YELLOW}NaN{RESET}"
+            else:
+                # Red: insufficient bars or calculation error
+                data_col = f"{RED}{bar_count}/{min_required}{RESET}"
+
+            # Signal visibility columns (up to 5)
+            # Format: colored label based on True/False
+            vis_cols = ["", "", "", "", ""]  # 5 placeholder columns
+            signal_vis = getattr(state, "signal_visibility", []) or []
+            for i, (label, is_true) in enumerate(signal_vis[:5]):
+                color = CYAN if is_true else GRAY
+                vis_cols[i] = f"{color}{label}{RESET}"
+
+            # Trading window countdowns from calendar
+            t_win = "-"
+            t_flat = "-"
+            if self.calendar is not None:
+                from datetime import datetime
+                from datetime import timezone as tz
+
+                try:
+                    allowed_sessions = getattr(state, "allowed_sessions", None) or ["24/7"]
+                    cal_status = self.calendar.get_status(
+                        state.symbol,
+                        datetime.now(tz.utc),
+                        position_qty=int(qty),
+                        allowed_sessions=allowed_sessions,
+                    )
+
+                    # tWin: countdown until order entry is blocked (stop_new_orders)
+                    if cal_status.can_enter_orders:
+                        # Currently can trade - show countdown to stop_new_orders
+                        if cal_status.stop_orders_countdown_seconds is not None:
+                            mins = cal_status.stop_orders_countdown_seconds // 60
+                            if mins > 30:
+                                t_win = f"{BOLD_GREEN}{mins}m{RESET}"
+                            else:
+                                t_win = f"{YELLOW}{mins}m{RESET}"
+                        else:
+                            t_win = f"{BOLD_GREEN}open{RESET}"
+                    else:
+                        # Can't trade - show countdown to next opening
+                        if cal_status.platform_countdown_seconds is not None:
+                            mins = cal_status.platform_countdown_seconds // 60
+                            t_win = f"{RED}+{mins}m{RESET}"
+                        else:
+                            t_win = f"{RED}closed{RESET}"
+
+                    # tFlat: countdown until must be flat (force_flat)
+                    if cal_status.close_countdown_seconds is not None:
+                        flat_mins = cal_status.close_countdown_seconds // 60
+                        if flat_mins <= 15:
+                            t_flat = f"{RED}{flat_mins}m{RESET}"
+                        elif flat_mins <= 60:
+                            t_flat = f"{YELLOW}{flat_mins}m{RESET}"
+                        else:
+                            t_flat = f"{flat_mins}m"
+                    elif cal_status.must_be_flat:
+                        t_flat = f"{RED}NOW{RESET}"
+                except Exception:
+                    pass  # Keep defaults if calendar lookup fails
+
+            # Build row
+            row = {
+                "symbol": state.symbol,
+                "strategy": state.strategy_id[-6:],  # Last 6 chars for brevity
+                "qty": f"{qty:+.0f}" if qty != 0 else "-",
+                "side": side,
+                "entry": f"{entry_price:.2f}" if entry_price else "-",
+                "price": f"{current_price:.2f}" if current_price else "-",
+                "pnl": pnl_str if qty != 0 else "-",
+                "→SL": ticks_to_sl,
+                "→TP": ticks_to_tp,
+                "SL/TP": sl_tp_exist,
+                "@SL": pnl_at_sl,
+                "@TP": pnl_at_tp,
+                "held": time_held,
+                "bars": f"{bars_in}/{max_bars_str}",
+                "signal": last_signal[:4] if last_signal != "-" else "-",
+                "tWin": t_win,
+                "tFlat": t_flat,
+                "data": data_col,
+                "v1": vis_cols[0],
+                "v2": vis_cols[1],
+                "v3": vis_cols[2],
+                "v4": vis_cols[3],
+                "v5": vis_cols[4],
+                "_bg": row_bg,
+            }
+            rows.append(row)
+
+        if not rows:
+            return "No strategies loaded"
+
+        # Build table
+        headers = [
+            "symbol",
+            "strategy",
+            "qty",
+            "side",
+            "entry",
+            "price",
+            "pnl",
+            "→SL",
+            "→TP",
+            "SL/TP",
+            "@SL",
+            "@TP",
+            "held",
+            "bars",
+            "signal",
+            "tWin",
+            "tFlat",
+            "data",
+            "v1",
+            "v2",
+            "v3",
+            "v4",
+            "v5",
+        ]
+        col_widths = {h: max(len(h), max(len(str(r.get(h, ""))) for r in rows)) for h in headers}
+
+        # Header line
+        header_line = "  ".join(f"{h:>{col_widths[h]}}" for h in headers)
+        separator = "-" * len(header_line)
+
+        lines = [f"{DIM}{header_line}{RESET}", separator]
+
+        for row in rows:
+            bg = row.get("_bg", "")
+            line_parts = []
+            for h in headers:
+                val = str(row.get(h, "-"))
+                # Strip ANSI for width calculation
+                import re
+
+                clean_val = re.sub(r"\033\[[0-9;]*m", "", val)
+                padding = col_widths[h] - len(clean_val)
+                line_parts.append(" " * padding + val)
+            line = "  ".join(line_parts)
+            if bg:
+                lines.append(f"{bg}{line}{RESET}")
+            else:
+                lines.append(line)
+
+        return "\n".join(lines)
 
     def force_flatten(self, current_time: Optional[datetime] = None) -> tuple[int, list]:
         """

@@ -34,6 +34,7 @@ STRATEGY_CONFIG = {
     "time_exit": {
         "max_bars": 120,
     },
+    "allowed_sessions": ["24/7"],  # 24/7 market
     "metadata": {
         "strategy_type": "mean_reversion",
         "direction": "long",
@@ -139,3 +140,15 @@ def generate_signal(state, df):
     if go_short(state, df):
         return "SELL"
     return "HOLD"
+
+
+def get_signal_visibility(state, df):
+    """Return list of (label, is_true) for live status display."""
+    indicators = populate_indicators(df, state.params)
+    hurst_threshold = state.params.get("hurst_threshold", 0.65)
+    return [
+        ("L<SMA3", indicators["low"] < indicators["sma_3"]),
+        ("Mom↓", indicators["mom_current"] < indicators["mom_4ago"]),
+        ("SMA8↓", indicators["sma_8_current"] < indicators["sma_8_2ago"]),
+        (f"Hurst>{hurst_threshold}", indicators["hurst"] > hurst_threshold),
+    ]

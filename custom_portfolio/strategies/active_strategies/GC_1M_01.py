@@ -33,7 +33,7 @@ STRATEGY_CONFIG = {
     "time_exit": {
         "max_bars": 180,
     },
-    # No allowed_sessions - 24/7 market
+    "allowed_sessions": ["24/7"],  # 24/7 market
     "metadata": {
         "strategy_type": "mean_reversion",
         "direction": "long",
@@ -112,3 +112,21 @@ def generate_signal(state, df):
     if go_short(state, df):
         return "SELL"
     return "HOLD"
+
+
+def get_signal_visibility(state, df):
+    """
+    Optional: Return list of (label, is_true) tuples for live status display.
+
+    Each tuple is displayed as a colored column in the live status table:
+    - Cyan = condition is True
+    - Gray = condition is False
+    """
+    indicators = populate_indicators(df, state.params)
+
+    return [
+        ("RSI↓", indicators["rsi_14_current"] <= indicators["rsi_14_5ago"]),
+        ("RSI2>90", indicators["rsi_2"] >= 90),
+        ("EMA20↑", indicators["ema_20_current"] > indicators["ema_20_3ago"]),
+        ("EMA50↑", indicators["ema_50_current"] > indicators["ema_50_4ago"]),
+    ]

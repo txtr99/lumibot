@@ -107,3 +107,13 @@ def generate_signal(state, df):
     if go_short(state, df):
         return "SELL"
     return "HOLD"
+
+
+def get_signal_visibility(state, df):
+    """Return list of (label, is_true) for live status display."""
+    indicators = populate_indicators(df, state.params)
+    return [
+        ("5Hi↓", indicators["consecutive_down_high"] == 1),
+        ("RSI↓", indicators["rsi_current"] <= indicators["rsi_5ago"]),
+        ("ADX↓", indicators["adx_current"] <= indicators["adx_3ago"]),
+    ]

@@ -202,6 +202,9 @@ class MultiStrategyExecutor:
         symbols = list(set(strategy.symbol for strategy in self.strategies))
         self.logger.debug(f"Fetching data for {len(symbols)} unique symbols: {symbols}")
 
+        # Invalidate cache at start of each iteration to ensure fresh data
+        self.shared_data.invalidate_cache()
+
         self.shared_data.fetch_for_all_strategies(
             symbols=symbols,
             length=100,  # Configurable
@@ -400,8 +403,10 @@ class MultiStrategyExecutor:
                     # Assume fill at last close price
                     current_price = market_data.df["close"].iloc[-1]
 
+                    # Pass order tag for idempotency tracking
+                    order_id = getattr(order, "tag", None)
                     strategy_state.tracker.execute_order(
-                        strategy_state.symbol, order.quantity, order.side, current_price
+                        strategy_state.symbol, order.quantity, order.side, current_price, order_id=order_id
                     )
 
                     self.logger.debug(

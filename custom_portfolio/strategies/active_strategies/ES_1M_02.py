@@ -179,3 +179,13 @@ def generate_signal(state, df):
         print("=" * 60 + "\n", file=sys.stderr, flush=True)
 
     return signal
+
+
+def get_signal_visibility(state, df):
+    """Return list of (label, is_true) for live status display."""
+    indicators = populate_indicators(df, state.params)
+    return [
+        ("L>EMA", indicators["low"] > indicators["ema_100"]),
+        ("RSI80-90", indicators["rsi_2"] >= 80 and indicators["rsi_2"] <= 90),
+        ("MACD↓", indicators["macd_hist_current"] <= indicators["macd_hist_prev"]),
+    ]

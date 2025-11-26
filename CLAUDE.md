@@ -1,40 +1,97 @@
-# Lumibot Fork - Development Guide
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Virtual Environment
 
 This project uses a standard Python virtual environment (not Poetry).
 
-**Activate the virtual environment:**
 ```bash
 source venv/bin/activate
+pip install <package-name>  # If packages are missing
 ```
 
-**If packages are missing, install with pip after activating:**
-```bash
-source venv/bin/activate
-pip install <package-name>
-```
+## Common Commands
 
-## Running Tests
-
-**Always activate the venv first, then run pytest:**
 ```bash
+# Run all tests
 source venv/bin/activate && pytest tests/ -v
+
+# Run specific test file/class/method
+pytest tests/test_trading_calendar_sessions.py -v
+pytest tests/test_trading_calendar_sessions.py::TestTradingCalendarSessions -v
+pytest tests/test_trading_calendar_sessions.py::TestTradingCalendarSessions::test_weekend_blackout_enforcement -v
+
+# Run backtest example
+python -m lumibot.example_strategies.stock_buy_and_hold
+
+# Code coverage
+coverage run; coverage report; coverage html
+
+# Run portfolio strategies (live/backtest)
+python custom_portfolio/strategies/run_portfolio.py
 ```
 
-**Run a specific test file:**
-```bash
-source venv/bin/activate && pytest tests/test_trading_calendar_sessions.py -v
+## Architecture Overview
+
+### Core Lumibot (upstream library)
+- `lumibot/strategies/strategy.py` - Base Strategy class with lifecycle methods (`initialize`, `on_trading_iteration`, `before_market_opens`, etc.)
+- `lumibot/brokers/` - Broker implementations (Alpaca, Interactive Brokers, ProjectX, Tradier, etc.)
+- `lumibot/data_sources/` - Data source implementations (Polygon, Yahoo, Databento, etc.)
+- `lumibot/entities/` - Core entities: Asset, Order, Position, Bars, Quote
+- `lumibot/backtesting/` - Backtesting infrastructure for each data source
+
+### Custom Portfolio System (multi-strategy trading)
+This fork adds a complete multi-strategy trading system for futures:
+
+```
+custom_portfolio/
+├── strategies/
+│   ├── portfolio_manager.py      # Auto-discovers strategies from active_strategies/
+│   ├── run_portfolio.py          # Entry point for running the portfolio
+│   ├── active_strategies/        # Drop strategy files here (auto-loaded)
+│   │   ├── ES_1M_01.py          # E-mini S&P strategies
+│   │   ├── NQ_1M_01.py          # E-mini Nasdaq strategies
+│   │   └── GC_1M_01.py          # Gold strategies
+│   └── templates/
+│       └── strategy_template.py  # Template for new strategies
+├── multi_strategy_executor.py    # Runs 30+ strategies with shared resources
+├── multi_strategy_executor_enhanced.py  # Enhanced version with brackets
+└── tools/
+    ├── shared_data_manager.py    # Caches market data (95%+ API reduction)
+    ├── global_rate_limiter.py    # 2-second order delays
+    ├── strategy_attribution.py   # Per-strategy P&L tracking
+    └── strategy_state.py         # Per-strategy state management
 ```
 
-**Run a specific test class:**
-```bash
-source venv/bin/activate && pytest tests/test_trading_calendar_sessions.py::TestTradingCalendarSessions -v
-```
+### Virtual Position Tracking
+`lumibot/tools/virtual_position_tracker.py` - Critical for brokers with unreliable position APIs (like TopStepX). Tracks positions locally independent of broker, assuming market orders fill immediately.
 
-**Run a specific test method:**
-```bash
-source venv/bin/activate && pytest tests/test_trading_calendar_sessions.py::TestTradingCalendarSessions::test_weekend_blackout_enforcement -v
+### Trading Calendar System
+`lumibot/tools/trading_calendar.py` - Two-layer restriction system:
+- Layer 1 (Platform): Broker-specific restrictions (TopStepX maintenance windows)
+- Layer 2 (Session): Instrument-specific trading windows (NY session, London session, etc.)
+
+### Bracket Order Management
+`tools/bracket_order_manager.py` - Workaround for ProjectX API's broken OCO. Polls order status and cancels orphaned stop/limit orders when one side fills.
+
+## Strategy Template Pattern
+
+Each strategy in `active_strategies/` must define:
+```python
+STRATEGY_CONFIG = {
+    "strategy_id": "",  # Empty = use filename
+    "symbol": "ES",
+    "contracts": 1,
+    "params": {"sma_length": 200},  # Use _length/_period suffixes for auto min_bars
+    "bracket_orders": {"atr_period": 20, "pt_mult": 2.0, "sl_mult": 1.0},
+    "allowed_sessions": ["New_York"],
+}
+
+def populate_indicators(df, params) -> dict: ...
+def go_long(state, df) -> bool: ...
+def go_short(state, df) -> bool: ...
+def generate_signal(state, df) -> str: ...  # "BUY", "SELL", "HOLD"
 ```
 
 ## Environment Variables

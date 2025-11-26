@@ -120,14 +120,15 @@ class SharedDataManager:
         Returns:
             True if cache is valid (not expired), False otherwise
         """
-        # Fast path: if we already have the data cached, reuse it (expected in backtests)
-        if cache_key in self.cache:
-            return True
+        # Data must exist in cache
+        if cache_key not in self.cache:
+            return False
 
-        # Otherwise, fall back to TTL check for any future extensions/live reuse
+        # Must have a recorded fetch time
         if cache_key not in self.last_fetch:
             return False
 
+        # Check TTL - data expires after cache_ttl_seconds
         age = time.time() - self.last_fetch[cache_key]
         return age < self.cache_ttl_seconds
 
@@ -151,6 +152,125 @@ class SharedDataManager:
             except Exception:
                 continue
         return index
+
+    def _forward_fill_gaps(self, data, max_gap_minutes: int = 10, timestep: str = "minute"):
+        """
+        Forward-fill small gaps in 1-minute data to maintain time series integrity.
+
+        For technical analysis, we need continuous time series. Small gaps (e.g., minutes
+        with no trades in low-volume instruments like MGC) should be filled with flat
+        candles (OHLC = previous close, volume = 0).
+
+        Larger gaps (> max_gap_minutes) are left as-is since they likely represent
+        legitimate market closures (maintenance windows, etc.).
+
+        Args:
+            data: Bars object or DataFrame with OHLCV data
+            max_gap_minutes: Maximum gap size to fill (default: 10 minutes)
+            timestep: Data timestep (only "minute" supported for now)
+
+        Returns:
+            Bars object or DataFrame with gaps filled
+        """
+        import pandas as pd
+
+        if timestep != "minute":
+            # Only support minute data for now
+            return data
+
+        # Extract DataFrame from Bars object if needed
+        is_bars_object = hasattr(data, "df")
+        if is_bars_object:
+            df = data.df.copy()
+            original_asset = getattr(data, "asset", None)
+            original_source = getattr(data, "source", "PROJECTX")
+        else:
+            df = data.copy() if data is not None else None
+
+        if df is None or df.empty:
+            return data
+
+        # Ensure we have a datetime index
+        if not isinstance(df.index, pd.DatetimeIndex):
+            if "datetime" in df.columns:
+                df = df.set_index("datetime")
+            else:
+                self.logger.debug("[SDM] Cannot forward-fill: no datetime index/column")
+                return data
+
+        # Sort by time
+        df = df.sort_index()
+
+        # Get the time range
+        start_time = df.index.min()
+        end_time = df.index.max()
+
+        # Store original timezone info
+        original_tz = df.index.tz
+
+        # Create complete minute range
+        if original_tz is not None:
+            full_range = pd.date_range(start=start_time, end=end_time, freq="1min", tz=original_tz)
+        else:
+            full_range = pd.date_range(start=start_time, end=end_time, freq="1min")
+
+        # Reindex to full range (creates NaN for missing minutes)
+        df_reindexed = df.reindex(full_range)
+        df_reindexed.index.name = "datetime"
+
+        # Identify gaps (consecutive NaN runs)
+        is_missing = df_reindexed["close"].isna()
+        if not is_missing.any():
+            # No gaps to fill
+            return data
+
+        # Find gap groups using cumsum trick
+        gap_groups = (is_missing != is_missing.shift()).cumsum()
+        gap_groups_missing = gap_groups[is_missing]
+
+        filled_count = 0
+        skipped_count = 0
+
+        for group_id in gap_groups_missing.unique():
+            gap_mask = (gap_groups == group_id) & is_missing
+            gap_size = gap_mask.sum()
+
+            if gap_size <= max_gap_minutes:
+                # Fill this gap with flat candles
+                gap_indices = df_reindexed.index[gap_mask]
+                first_gap_idx = gap_indices[0]
+                idx_loc = df_reindexed.index.get_loc(first_gap_idx)
+
+                if idx_loc > 0:
+                    # Get previous bar's close price
+                    prev_close = df_reindexed.iloc[idx_loc - 1]["close"]
+
+                    # Create flat candles: OHLC = prev_close, volume = 0
+                    df_reindexed.loc[gap_mask, "open"] = prev_close
+                    df_reindexed.loc[gap_mask, "high"] = prev_close
+                    df_reindexed.loc[gap_mask, "low"] = prev_close
+                    df_reindexed.loc[gap_mask, "close"] = prev_close
+                    df_reindexed.loc[gap_mask, "volume"] = 0
+
+                    filled_count += gap_size
+            else:
+                skipped_count += gap_size
+
+        # Drop remaining NaN rows (gaps > max_gap_minutes)
+        df_filled = df_reindexed.dropna(subset=["close"])
+
+        if filled_count > 0:
+            self.logger.debug(
+                f"[SDM] Forward-filled {filled_count} bars, skipped {skipped_count} " f"(gaps > {max_gap_minutes} min)"
+            )
+
+        # Return in same format as input
+        if is_bars_object:
+            from lumibot.entities import Bars
+
+            return Bars(df=df_filled, source=original_source, asset=original_asset, raw=df_filled.to_dict())
+        else:
+            return df_filled
 
     def fetch_for_all_strategies(
         self, symbols: List[str], length: int, timestep: str, asset_type: str = Asset.AssetType.CONT_FUTURE
@@ -176,7 +296,8 @@ class SharedDataManager:
         fetch_start = time.perf_counter()
         debug_enabled = self.logger.isEnabledFor(logging.DEBUG)
         self._log_verbose(
-            f"[SDM] fetch_for_all_strategies start symbols={symbols} length={length} timestep={timestep} asset_type={asset_type}"
+            f"[SDM] fetch_for_all_strategies start symbols={symbols} "
+            f"length={length} timestep={timestep} asset_type={asset_type}"
         )
         phase1_start = time.perf_counter()
         to_fetch = []
@@ -187,9 +308,7 @@ class SharedDataManager:
             self._log_verbose("[SDM] acquiring lock for phase1")
             lock_wait_start = time.perf_counter()
             with self.lock:
-                self._log_verbose(
-                    f"[SDM] lock acquired in {time.perf_counter() - lock_wait_start:.6f}s"
-                )
+                self._log_verbose(f"[SDM] lock acquired in {time.perf_counter() - lock_wait_start:.6f}s")
                 unique_symbols = list(set(symbols))
                 if debug_enabled:
                     self.logger.debug(f"[SDM] phase1 unique_symbols={unique_symbols}")
@@ -235,9 +354,7 @@ class SharedDataManager:
                     all_cached_flag = True
         finally:
             if debug_enabled:
-                self.logger.debug(
-                    f"[SDM] phase1 exit unique_symbols={unique_symbols} to_fetch={to_fetch}"
-                )
+                self.logger.debug(f"[SDM] phase1 exit unique_symbols={unique_symbols} to_fetch={to_fetch}")
 
         if all_cached_flag and not to_fetch:
             self._log_verbose(
@@ -267,6 +384,8 @@ class SharedDataManager:
             # Try grabbing from datasource store directly to avoid API
             data_obj = store_index.get(symbol)
             if data_obj is not None:
+                # Apply forward-fill for small gaps before caching
+                data_obj = self._forward_fill_gaps(data_obj, max_gap_minutes=10, timestep=timestep)
                 now_ts = time.time()
                 with self.lock:
                     self.cache[cache_key] = data_obj
@@ -288,12 +407,12 @@ class SharedDataManager:
                 )
                 continue
 
-            self._log_verbose(
-                f"[SDM] No prefetched/store data for {symbol}; fetching from API"
-            )
+            self._log_verbose(f"[SDM] No prefetched/store data for {symbol}; fetching from API")
             try:
                 asset = Asset(symbol, asset_type=asset_type)
                 data = self.data_source.get_historical_prices(asset, length, timestep)
+                # Apply forward-fill for small gaps before caching
+                data = self._forward_fill_gaps(data, max_gap_minutes=10, timestep=timestep)
                 now_ts = time.time()
                 # Store result under lock
                 with self.lock:
@@ -301,8 +420,7 @@ class SharedDataManager:
                     self.last_fetch[cache_key] = now_ts
                     self.total_fetches += 1
                 self.logger.debug(
-                    f"[SDM] Cached data for {cache_key} "
-                    f"duration={time.perf_counter() - per_symbol_start:.6f}s"
+                    f"[SDM] Cached data for {cache_key} " f"duration={time.perf_counter() - per_symbol_start:.6f}s"
                 )
             except Exception as e:
                 self.logger.error(f"Failed to fetch data for {symbol}: {e}")
