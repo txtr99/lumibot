@@ -178,10 +178,48 @@ from lumibot.strategies import Strategy  # noqa: E402
 
 # Global flag for interrupt handling
 _interrupted = False
+_run_mode = "backtest"  # "backtest" or "live" - set by run_backtest/run_live
 
 # Trend sentiment cache (refreshes every 5 minutes)
 _trend_sentiment_cache = {"data": None, "timestamp": 0}
 _TREND_REFRESH_SECONDS = 300  # 5 minutes
+
+# Market closed detection settings
+_MARKET_CLOSED_ERROR_THRESHOLD = 3  # Consecutive errors before pausing
+_MARKET_CLOSED_PAUSE_MINUTES = 30  # Minutes to pause when market detected as closed
+_MARKET_CLOSED_ERROR_PATTERNS = [
+    "market is currently closed",
+    "market closed",
+    "outside trading hours",
+]
+
+
+def _is_market_closed_error(error_msg: str) -> bool:
+    """Check if an error message indicates the market is closed."""
+    if not error_msg:
+        return False
+    lowered = error_msg.lower()
+    return any(pattern in lowered for pattern in _MARKET_CLOSED_ERROR_PATTERNS)
+
+
+def _get_market_closed_errors_from_executor(executor) -> list[str]:
+    """
+    Check executor's strategies for recent market closed errors.
+
+    Returns a list of error messages that match market closed patterns.
+    """
+    errors = []
+    if executor is None:
+        return errors
+
+    for state in executor.strategies:
+        # Check for recent rejected orders with market closed errors
+        # The executor stores last_order_error on state (if available)
+        last_error = getattr(state, "last_order_error", None)
+        if last_error and _is_market_closed_error(last_error):
+            errors.append(last_error)
+
+    return errors
 
 
 def get_trend_sentiment_table(symbols: list[str], force_refresh: bool = False) -> str:
@@ -215,19 +253,41 @@ def get_trend_sentiment_table(symbols: list[str], force_refresh: bool = False) -
         old_stdout = sys.stdout
         sys.stdout = io.StringIO()
         try:
-            vibes, _ = build_vibes(
+            fresh_vibes, _ = build_vibes(
                 symbols,
-                lookback_minutes=240,
+                lookback_minutes=480,  # 8 hours - enough for MGC's limited overnight bars
                 use_sim=False,
-                latency_minutes=10,
+                latency_minutes=45,  # Databento historical can lag 30-45 min
                 dataset="GLBX.MDP3",
                 schema="ohlcv-1m",
             )
         finally:
             sys.stdout = old_stdout
 
-        _trend_sentiment_cache["data"] = vibes
-        _trend_sentiment_cache["timestamp"] = now
+        # Check if we got real data
+        has_real_data = any(v.get("vibe") != "no data" for v in fresh_vibes.values())
+
+        if has_real_data:
+            # Fresh data is good - cache it
+            vibes = fresh_vibes
+            _trend_sentiment_cache["data"] = vibes
+            _trend_sentiment_cache["timestamp"] = now
+        elif _trend_sentiment_cache["data"]:
+            # Fresh fetch failed but we have old cached data - use that
+            old_has_data = any(v.get("vibe") != "no data" for v in _trend_sentiment_cache["data"].values())
+            if old_has_data:
+                vibes = _trend_sentiment_cache["data"]
+                # Don't update timestamp - shows how old the data really is
+            else:
+                # Old cache is also bad - use fresh (failed) and update timestamp to prevent spam
+                vibes = fresh_vibes
+                _trend_sentiment_cache["data"] = vibes
+                _trend_sentiment_cache["timestamp"] = now
+        else:
+            # No cache at all - use fresh (failed) data
+            vibes = fresh_vibes
+            _trend_sentiment_cache["data"] = vibes
+            _trend_sentiment_cache["timestamp"] = now
 
     # Build color-coded table
     # ANSI colors
@@ -299,13 +359,22 @@ def get_trend_sentiment_table(symbols: list[str], force_refresh: bool = False) -
 
 
 def signal_handler(signum, frame):
-    """Handle CTRL-C gracefully."""
+    """Handle CTRL-C gracefully with mode-specific messages."""
     from custom_portfolio.tools.terminal_formatter import TerminalFormatter as TF
 
     global _interrupted
     _interrupted = True
     print("")
-    print(TF.warning("Interrupt received (CTRL-C), stopping backtest..."))
+
+    if _run_mode == "live":
+        print(TF.warning("Interrupt received (CTRL-C), stopping live trading..."))
+        print("")
+        print(TF.error("⚠️  IMPORTANT: Don't forget to monitor open positions!"))
+        print(TF.error("    Check the exchange and manually close any open positions."))
+        print("")
+    else:
+        print(TF.warning("Interrupt received (CTRL-C), stopping backtest..."))
+
     sys.exit(1)
 
 
@@ -1512,6 +1581,18 @@ def run_backtest(args):
                 print(f"\nSnapshot log written to {out_path}")
 
 
+def _print_shutdown_report(bracket_manager, portfolio_manager):
+    """Print final stats on shutdown."""
+    if bracket_manager is not None:
+        print(f"\nBracket Manager Stats: {bracket_manager.stats}")
+
+    if portfolio_manager is not None:
+        report = portfolio_manager.get_performance_report()
+        if report is not None:
+            print("\nFinal Portfolio Performance:")
+            print(report)
+
+
 def run_live(args):
     """
     Run the portfolio in live trading mode.
@@ -1523,6 +1604,10 @@ def run_live(args):
         DRY_RUN: Set to 'true' to enable dry-run mode (no real orders).
                  Default is FALSE for live trading (real orders).
     """
+    global _run_mode, _interrupted
+    _run_mode = "live"
+    _interrupted = False  # Reset on fresh run
+
     # Register signal handler for CTRL-C to ensure clean shutdown
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -1824,12 +1909,60 @@ def run_live(args):
     last_reconcile_poll = 0
     last_bracket_scanned = 0  # Track for heartbeat display
 
+    # Market closed detection state
+    market_closed_error_count = 0
+    market_closed_pause_until = None  # datetime when pause expires
+
     # Main trading loop
     try:
-        while True:
+        while not _interrupted:
             poll_iteration += 1
             current_time = datetime.now()
             current_minute = current_time.replace(second=0, microsecond=0)
+
+            # ================================================================
+            # MARKET CLOSED PAUSE: Skip iterations if in pause mode
+            # ================================================================
+            if market_closed_pause_until is not None:
+                if current_time < market_closed_pause_until:
+                    # Still in pause mode - show warning and skip iteration
+                    remaining = market_closed_pause_until - current_time
+                    remaining_mins = int(remaining.total_seconds() // 60)
+                    remaining_secs = int(remaining.total_seconds() % 60)
+
+                    # Only print warning every 5 minutes (150 poll iterations)
+                    if poll_iteration % 150 == 1:
+                        print(
+                            f"\033[93m⚠️  MARKETS POTENTIALLY CLOSED - WAITING {remaining_mins}m {remaining_secs}s "
+                            f"(until {market_closed_pause_until.strftime('%H:%M:%S')})\033[0m",
+                            flush=True,
+                        )
+                        print(
+                            f"\033[93m   Last error: {market_closed_error_count} consecutive "
+                            f"'market closed' rejections\033[0m",
+                            flush=True,
+                        )
+
+                    # Reduced heartbeat during pause (every 5 minutes instead of 30s)
+                    if poll_iteration % 150 == 0:
+                        print(
+                            f"[HEARTBEAT-PAUSED] {current_time.strftime('%H:%M:%S')} | "
+                            f"waiting for market to open ({remaining_mins}m {remaining_secs}s remaining)",
+                            flush=True,
+                        )
+
+                    # Sleep and continue to next iteration (skip strategy execution)
+                    time.sleep(POLL_INTERVAL_SECONDS)
+                    continue
+                else:
+                    # Pause expired - attempt to resume
+                    print(
+                        f"\033[92m✓ Market closed pause expired at {current_time.strftime('%H:%M:%S')} - "
+                        f"attempting to resume trading...\033[0m",
+                        flush=True,
+                    )
+                    market_closed_pause_until = None
+                    # Don't reset error count yet - wait for successful order
 
             # ================================================================
             # NEW CANDLE: Run full trading iteration on minute boundary
@@ -1845,6 +1978,66 @@ def run_live(args):
 
                 # Run one trading iteration
                 result = portfolio_manager.run_iteration(current_time)
+
+                # ============================================================
+                # MARKET CLOSED ERROR DETECTION
+                # ============================================================
+                if result:
+                    rejected_errors = result.get("rejected_errors", [])
+                    orders_submitted = result.get("orders_submitted", 0)
+
+                    # Check for market closed errors in rejected orders
+                    market_closed_errors = [err for err in rejected_errors if _is_market_closed_error(err)]
+
+                    if market_closed_errors:
+                        market_closed_error_count += len(market_closed_errors)
+                        print(
+                            f"\033[93m⚠️  Market closed error detected: {market_closed_errors[0]}\033[0m",
+                            flush=True,
+                        )
+                        print(
+                            f"\033[93m   Consecutive market closed errors: "
+                            f"{market_closed_error_count}/{_MARKET_CLOSED_ERROR_THRESHOLD}\033[0m",
+                            flush=True,
+                        )
+
+                        # Check if threshold reached - enter pause mode
+                        if market_closed_error_count >= _MARKET_CLOSED_ERROR_THRESHOLD:
+                            from datetime import timedelta
+
+                            market_closed_pause_until = current_time + timedelta(minutes=_MARKET_CLOSED_PAUSE_MINUTES)
+                            print(
+                                f"\n\033[93m{'='*60}\033[0m",
+                                flush=True,
+                            )
+                            print(
+                                "\033[93m⚠️  MARKETS POTENTIALLY CLOSED\033[0m",
+                                flush=True,
+                            )
+                            print(
+                                f"\033[93m   Pausing for {_MARKET_CLOSED_PAUSE_MINUTES} minutes\033[0m",
+                                flush=True,
+                            )
+                            print(
+                                f"\033[93m   Will resume at: "
+                                f"{market_closed_pause_until.strftime('%H:%M:%S')}\033[0m",
+                                flush=True,
+                            )
+                            print(
+                                f"\033[93m{'='*60}\033[0m\n",
+                                flush=True,
+                            )
+
+                    elif orders_submitted > 0:
+                        # Orders succeeded - reset the error counter
+                        if market_closed_error_count > 0:
+                            print(
+                                f"\033[92m✓ Order succeeded - resetting market closed "
+                                f"error counter (was {market_closed_error_count})\033[0m",
+                                flush=True,
+                            )
+                        market_closed_error_count = 0
+                # ============================================================
 
                 # Print summary
                 if result and not result.get("error"):
@@ -1871,6 +2064,13 @@ def run_live(args):
                         print(sentiment_table, flush=True)
                     except Exception as e:
                         print(f"  (trend sentiment unavailable: {e})", flush=True)
+
+                    # Plot side-by-side instrument charts (uses plotext)
+                    try:
+                        if portfolio_manager.executor:
+                            portfolio_manager.executor.plot_instrument_charts(bars=60, height=20)
+                    except Exception as e:
+                        print(f"  (charts unavailable: {e})", flush=True)
                 elif result and result.get("error"):
                     print(f"  Error: {result['error']}", flush=True)
 
@@ -1911,10 +2111,41 @@ def run_live(args):
                     # Log significant events
                     if poll_result.get("fills_processed"):
                         for fill in poll_result["fills_processed"]:
-                            print(
-                                f"[BRACKET] Processed {fill['type']} fill: {fill['strategy']} @ {fill['price']}",
-                                flush=True,
-                            )
+                            if fill["type"] == "exit" and fill.get("exit_type"):
+                                # Exit fill - show TP/SL type and P&L
+                                exit_type = fill.get("exit_type", "?")
+                                pnl = fill.get("pnl")
+                                pnl_str = f"${pnl:+.2f}" if pnl is not None else "?"
+                                # Color code: green for profit, red for loss
+                                if pnl is not None and pnl >= 0:
+                                    pnl_color = "\033[92m"  # Green
+                                else:
+                                    pnl_color = "\033[91m"  # Red
+                                reset = "\033[0m"
+                                print(
+                                    f"[BRACKET] {exit_type} filled: {fill['strategy']} @ {fill['price']} "
+                                    f"(P&L: {pnl_color}{pnl_str}{reset})",
+                                    flush=True,
+                                )
+                            elif fill["type"] == "entry":
+                                print(
+                                    f"[BRACKET] Entry filled: {fill['strategy']} @ {fill['price']}",
+                                    flush=True,
+                                )
+                            elif fill["type"] == "exit_ignored":
+                                # Exit ignored - already flat, but order did fill on exchange
+                                reason = fill.get("reason", "unknown")
+                                price = fill.get("price", "?")
+                                print(
+                                    f"[BRACKET] Exit filled but ignored ({reason}): {fill['strategy']} @ {price}",
+                                    flush=True,
+                                )
+                            else:
+                                fill_price = fill.get("price", "?")
+                                print(
+                                    f"[BRACKET] Processed {fill['type']} fill: {fill['strategy']} @ {fill_price}",
+                                    flush=True,
+                                )
 
                     if poll_result.get("brackets_recreated"):
                         for tag in poll_result["brackets_recreated"]:
@@ -1931,6 +2162,54 @@ def run_live(args):
                         )
                         for item in poll_result["orphans_cancelled"]:
                             print(f"  - {item['type']} order {item['order_id']} ({item['reason']})", flush=True)
+
+                    # POSITION SYNC CHECK: Run every iteration for immediate desync detection
+                    if True:  # Always run - position sync is critical
+                        try:
+                            sync_result = bracket_manager.check_position_sync()
+                            if not sync_result.get("synced"):
+                                if sync_result.get("error"):
+                                    # API error - log but don't alarm
+                                    pass  # Already logged by bracket_manager
+                                elif sync_result.get("non_cooldown_discrepancies"):
+                                    # Position mismatch detected (excluding symbols in cooldown)
+                                    print(
+                                        TF.error("⚠️ POSITION DESYNC DETECTED! Attempting auto-repair..."),
+                                        flush=True,
+                                    )
+                                    for d in sync_result["non_cooldown_discrepancies"]:
+                                        diff_str = f"{d['diff']:+.0f}" if d["diff"] != 0 else "0"
+                                        print(
+                                            f"   {d['symbol']}: exchange={d['exchange_qty']:.0f}, "
+                                            f"virtual={d['virtual_qty']:.0f}, diff={diff_str}",
+                                            flush=True,
+                                        )
+
+                                    # AUTO-REPAIR: Zero out phantom positions
+                                    repair_result = bracket_manager.repair_position_desync(sync_result)
+
+                                    if repair_result.get("repairs_made"):
+                                        print(TF.warning("🔧 AUTO-REPAIR completed:"), flush=True)
+                                        for r in repair_result["repairs_made"]:
+                                            print(
+                                                f"   Zeroed {r['strategy']}: {r['old_qty']:.0f} -> 0",
+                                                flush=True,
+                                            )
+                                        if repair_result.get("brackets_cancelled"):
+                                            print(
+                                                f"   Cancelled {len(repair_result['brackets_cancelled'])} brackets",
+                                                flush=True,
+                                            )
+
+                                    if repair_result.get("warnings"):
+                                        for w in repair_result["warnings"]:
+                                            print(
+                                                TF.error(f"⚠️ MANUAL ACTION NEEDED: {w['message']}"),
+                                                flush=True,
+                                            )
+                        except Exception:
+                            # Non-fatal - just skip this sync check
+                            pass
 
                 except Exception as e:
                     # Don't crash the loop on bracket manager errors
@@ -1979,27 +2258,27 @@ def run_live(args):
                     flush=True,
                 )
 
-            # Sleep until next poll
-            time.sleep(POLL_INTERVAL_SECONDS)
+            # Sleep until next poll (interruptible - check flag every 0.1s)
+            for _ in range(int(POLL_INTERVAL_SECONDS * 10)):
+                if _interrupted:
+                    break
+                time.sleep(0.1)
+
+        # Loop exited via _interrupted flag
+        if _interrupted:
+            print("\n\nLive trading stopped by user (CTRL-C).")
+            _print_shutdown_report(bracket_manager, portfolio_manager)
 
     except KeyboardInterrupt:
         print("\n\nLive trading stopped by user.")
-
-        # Print bracket manager stats
-        if bracket_manager is not None:
-            print(f"\nBracket Manager Stats: {bracket_manager.stats}")
-
-        # Final performance report
-        report = portfolio_manager.get_performance_report()
-        if report is not None:
-            print("\nFinal Portfolio Performance:")
-            print(report)
+        _print_shutdown_report(bracket_manager, portfolio_manager)
 
     except Exception as e:
         print(f"\n❌ Error in live trading: {e}")
         import traceback
 
         print(traceback.format_exc())
+        _print_shutdown_report(bracket_manager, portfolio_manager)
 
 
 def validate_only(args):

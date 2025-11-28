@@ -17,7 +17,7 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -41,10 +41,12 @@ DEFAULT_LOOKBACK_MINUTES = 240  # ~4 hours at 1-minute bars
 ENV_FILES = [".env", "env", "env.local"]
 
 SYMBOLS = {
-    # Continuous front contracts only; single call, no fallbacks.
+    # Continuous contracts - use second position (.c.1) for MGC because TopStepX
+    # offers February 2026 (G26) while Databento's front month (.c.0) is December 2025 (Z25).
+    # This causes a ~$40 price mismatch if using .c.0 for MGC.
     "MES": "MES.c.0",
     "MNQ": "MNQ.c.0",
-    "MGC": "MGC.c.0",
+    "MGC": "MGC.c.1",  # G26 (Feb 2026) - matches TopStepX active contract
 }
 
 VIBE_MATRIX = {
@@ -89,7 +91,7 @@ def calc_bb_width(closes: pd.Series, length: int = 20, std: int = 2) -> pd.Serie
     return width
 
 
-def load_databento_key() -> Optional[str]:
+def load_databento_key() -> str | None:
     """Load Databento API key from environment or local env files without logging secrets."""
     key = os.getenv(ENV_API_KEY)
     if key:
@@ -216,8 +218,8 @@ def get_vibe(trend: str, volatility: str) -> str:
     return VIBE_MATRIX.get((trend, volatility), "unknown")
 
 
-def get_market_vibe(df: pd.DataFrame) -> Dict[str, str]:
-    if df is None or len(df) < 60:
+def get_market_vibe(df: pd.DataFrame) -> dict[str, str]:
+    if df is None or len(df) < 30:  # Lowered from 60 - MGC has fewer overnight bars
         return {"trend": "?", "vol": "?", "vibe": "no data"}
 
     trend = detect_trend(df)
@@ -234,11 +236,11 @@ def get_market_vibe(df: pd.DataFrame) -> Dict[str, str]:
 def fetch_data(
     symbol_key: str,
     lookback_minutes: int = DEFAULT_LOOKBACK_MINUTES,
-    api_key: Optional[str] = None,
+    api_key: str | None = None,
     latency_minutes: int = 10,
     dataset: str = "GLBX.MDP3",
     schema: str = "ohlcv-1m",
-) -> Optional[pd.DataFrame]:
+) -> pd.DataFrame | None:
     if not HAS_DATABENTO:
         print("(databento not installed)", end=" ")
         return None
@@ -305,6 +307,46 @@ def fetch_data(
 # =============================================================================
 
 
+def _log_ohlcv_debug(symbol: str, df: pd.DataFrame | None) -> None:
+    """Log last 60 bars of OHLCV for debugging price discrepancies."""
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    # Only log for tracked symbols
+    if symbol not in ("MGC", "MES", "MNQ"):
+        return
+
+    if df is None or len(df) == 0:
+        logger.info(f"[OHLCV-DEBUG] TrendSentiment/{symbol}: NO DATA")
+        return
+
+    tail = df.tail(60)
+    logger.info(f"[OHLCV-DEBUG] TrendSentiment/{symbol}: {len(tail)} bars")
+    if len(tail) > 0:
+        # Handle both timestamp column or index-based timestamps
+        if "ts_event" in tail.columns:
+            first_ts = tail["ts_event"].iloc[0]
+            last_ts = tail["ts_event"].iloc[-1]
+        elif hasattr(tail, "index"):
+            first_ts = tail.index[0]
+            last_ts = tail.index[-1]
+        else:
+            first_ts = "?"
+            last_ts = "?"
+
+        logger.info(
+            f"  First: {first_ts} O={tail['open'].iloc[0]:.2f} "
+            f"H={tail['high'].iloc[0]:.2f} L={tail['low'].iloc[0]:.2f} "
+            f"C={tail['close'].iloc[0]:.2f}"
+        )
+        logger.info(
+            f"  Last:  {last_ts} O={tail['open'].iloc[-1]:.2f} "
+            f"H={tail['high'].iloc[-1]:.2f} L={tail['low'].iloc[-1]:.2f} "
+            f"C={tail['close'].iloc[-1]:.2f}"
+        )
+
+
 def simulate_data(symbol: str, trend_bias: str = "up", vol_level: str = "med", seed: int = 42) -> pd.DataFrame:
     np.random.seed(seed)
 
@@ -329,7 +371,7 @@ def simulate_data(symbol: str, trend_bias: str = "up", vol_level: str = "med", s
     return df
 
 
-def print_vibes(vibes: Dict[str, Dict[str, str]], header: str) -> None:
+def print_vibes(vibes: dict[str, dict[str, str]], header: str) -> None:
     print()
     print("=" * 60)
     print(header)
@@ -350,7 +392,7 @@ def print_vibes(vibes: Dict[str, Dict[str, str]], header: str) -> None:
     print()
 
 
-def plot_closes(symbols: Iterable[str], dfs: Dict[str, Optional[pd.DataFrame]], header: str) -> None:
+def plot_closes(symbols: Iterable[str], dfs: dict[str, pd.DataFrame | None], header: str) -> None:
     """Render compact subplots (one per symbol) with a single show for perf."""
     valid = []
     for symbol in symbols:
@@ -403,16 +445,15 @@ def build_vibes(
     symbols: Iterable[str],
     lookback_minutes: int,
     use_sim: bool,
-    api_key: Optional[str] = None,
+    api_key: str | None = None,
     latency_minutes: int = 10,
     dataset: str = "GLBX.MDP3",
     schema: str = "ohlcv-1m",
-) -> Tuple[Dict[str, Dict[str, str]], Dict[str, Optional[pd.DataFrame]]]:
-    vibes: Dict[str, Dict[str, str]] = {}
-    results: Dict[str, Dict[str, str]] = {}
-    data_frames: Dict[str, Optional[pd.DataFrame]] = {}
+) -> tuple[dict[str, dict[str, str]], dict[str, pd.DataFrame | None]]:
+    results: dict[str, dict[str, str]] = {}
+    data_frames: dict[str, pd.DataFrame | None] = {}
     symbol_list = list(symbols)
-    statuses: Dict[str, str] = {}
+    statuses: dict[str, str] = {}
     databento_key = None if use_sim else (api_key or load_databento_key())
     if not databento_key and not use_sim:
         print(f"{ENV_API_KEY} not set; set it via env or an env file ({', '.join(ENV_FILES)})")
@@ -446,6 +487,8 @@ def build_vibes(
             statuses[symbol] = status_local
             data_frames[symbol] = df_local
             results[symbol] = get_market_vibe(df_local)
+            # Log OHLCV debug info for price discrepancy debugging
+            _log_ohlcv_debug(symbol, df_local)
 
     for symbol in symbol_list:
         status = statuses.get(symbol, "FAILED")
@@ -479,7 +522,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> Dict[str, Dict[str, str]]:
+def main() -> dict[str, dict[str, str]]:
     args = parse_args()
     lookback_minutes = args.minutes or args.hours * 60
     header_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")

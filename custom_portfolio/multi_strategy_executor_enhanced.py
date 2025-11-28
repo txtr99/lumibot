@@ -74,6 +74,12 @@ class EnhancedStrategyState(StrategyState):
         self.last_atr: Optional[float] = None
         self.last_atr_time: Optional[datetime] = None
 
+        # Entry-time bracket parameters (stored when signal fires, used after fill)
+        self.entry_atr: Optional[float] = None  # ATR at signal time
+        self.entry_pt_mult: Optional[float] = None  # Profit target multiplier
+        self.entry_sl_mult: Optional[float] = None  # Stop loss multiplier
+        self.brackets_submitted: bool = False  # Flag to prevent duplicate bracket submission
+
         # Signal visibility: list of (label, is_true) tuples for display
         # Set by get_signal_visibility() function in strategy file
         self.signal_visibility: List[tuple] = []
@@ -233,10 +239,10 @@ class MultiStrategyExecutorEnhanced:
         self.calendar = calendar
         self.default_atr_period = default_atr_period
         self.MIN_LOOKBACK_FLOOR = 100
-        self.MAX_LOOKBACK_CAP = 400
+        self.MAX_LOOKBACK_CAP = 800
         # Extra minutes to request beyond max_lookback to account for unfillable gaps
         # (e.g., 61-min daily maintenance window that can't be forward-filled)
-        self.FETCH_BUFFER_MINUTES = 75
+        self.FETCH_BUFFER_MINUTES = 400
         self.timestep = timestep
 
         # Initialize shared resources
@@ -419,6 +425,39 @@ class MultiStrategyExecutorEnhanced:
                 self.logger.info(message)
         else:
             self.logger.debug(message)
+
+    def _log_ohlcv_debug(self, symbol: str, source_name: str, df: pd.DataFrame) -> None:
+        """
+        Log last 60 bars of OHLCV for debugging price discrepancies.
+
+        Args:
+            symbol: Symbol being logged (e.g., "MGC")
+            source_name: Name of data source (e.g., "Strategy", "TrendSentiment")
+            df: DataFrame with OHLCV columns
+        """
+        # Only log for MGC to debug the price discrepancy issue
+        if symbol not in ("MGC", "MES", "MNQ"):
+            return
+
+        if df is None or len(df) == 0:
+            self.logger.info(f"[OHLCV-DEBUG] {source_name}/{symbol}: NO DATA")
+            return
+
+        tail = df.tail(60)
+        self.logger.info(f"[OHLCV-DEBUG] {source_name}/{symbol}: {len(tail)} bars")
+        if len(tail) > 0:
+            first_idx = tail.index[0]
+            last_idx = tail.index[-1]
+            self.logger.info(
+                f"  First: {first_idx} O={tail['open'].iloc[0]:.2f} "
+                f"H={tail['high'].iloc[0]:.2f} L={tail['low'].iloc[0]:.2f} "
+                f"C={tail['close'].iloc[0]:.2f}"
+            )
+            self.logger.info(
+                f"  Last:  {last_idx} O={tail['open'].iloc[-1]:.2f} "
+                f"H={tail['high'].iloc[-1]:.2f} L={tail['low'].iloc[-1]:.2f} "
+                f"C={tail['close'].iloc[-1]:.2f}"
+            )
 
     def _round_to_tick(self, price: Optional[float], symbol: str) -> Optional[float]:
         """
@@ -669,6 +708,19 @@ class MultiStrategyExecutorEnhanced:
             f"cache_stats={self.shared_data.get_cache_stats()}{_RESET}"
         )
 
+        # Log OHLCV debug info once per unique symbol (for price discrepancy debugging)
+        logged_symbols = set()
+        for sym in symbols:
+            if sym not in logged_symbols:
+                logged_symbols.add(sym)
+                try:
+                    md = self.shared_data.get_cached_data(sym, self.max_lookback, self.timestep)
+                    if md is not None:
+                        sym_df = md.df if hasattr(md, "df") else md
+                        self._log_ohlcv_debug(sym, "Strategy", sym_df)
+                except Exception as log_err:
+                    self.logger.debug(f"[OHLCV-DEBUG] Failed to log {sym}: {log_err}")
+
         # Step 2: Process each strategy independently
         for strategy_state in self.strategies:
             try:
@@ -767,6 +819,12 @@ class MultiStrategyExecutorEnhanced:
                 if virtual_qty != 0:
                     hit, hit_price, hit_reason = self._check_bracket_hit(strategy_state, df)
                     if hit and hit_price is not None:
+                        self.logger.info(
+                            f"[EXECUTOR-REASONING] {strategy_state.strategy_id}: I detected a bracket hit! "
+                            f"The price reached {hit_price} which triggered our {hit_reason}. "
+                            f"We're currently holding {virtual_qty} contracts, so I need to close this position now. "
+                            f"Creating a market order to exit."
+                        )
                         close_order = self._create_close_order(strategy_state, virtual_qty)
                         if close_order:
                             orders_to_submit.append((strategy_state, close_order, True, hit_reason, hit_price))
@@ -775,6 +833,11 @@ class MultiStrategyExecutorEnhanced:
                 # 2c. Time-based exit check
                 if virtual_qty != 0 and self._check_time_exit(strategy_state, df):
                     time_exits_triggered += 1
+                    self.logger.info(
+                        f"[EXECUTOR-REASONING] {strategy_state.strategy_id}: Time to exit! "
+                        f"We've been in this trade for {strategy_state.bars_in_trade} bars, which exceeds our max. "
+                        f"Still holding {virtual_qty} contracts. I'm forcing a close now to avoid overexposure."
+                    )
                     close_order = self._create_close_order(strategy_state, virtual_qty)
                     if close_order:
                         orders_to_submit.append((strategy_state, close_order, True, "time_exit", None))
@@ -798,20 +861,27 @@ class MultiStrategyExecutorEnhanced:
 
                     # 2d. Skip if platform closed
                     if not status.platform_open:
-                        self.logger.debug(f"{strategy_state.strategy_id}: Platform closed ({status.platform_reason})")
+                        self.logger.debug(
+                            f"[EXECUTOR-REASONING] {strategy_state.strategy_id}: Skipping - platform is closed. "
+                            f"Reason: {status.platform_reason}. I can't do anything while the exchange is down."
+                        )
                         continue
 
                     # 2e. Skip if can't enter new positions
                     if not status.can_enter_orders and virtual_qty == 0:
                         self.logger.debug(
-                            f"{strategy_state.strategy_id}: Cannot enter new orders (session restrictions)"
+                            f"[EXECUTOR-REASONING] {strategy_state.strategy_id}: Skipping signal check. "
+                            f"We're flat and outside our allowed session ({status.session_reason}). "
+                            f"No point generating signals when I can't act on them."
                         )
                         continue
 
                     # 2f. Force close if required by calendar
                     if status.must_be_flat and virtual_qty != 0:
-                        self._log_verbose(
-                            f"{strategy_state.strategy_id}: Force closing position " f"({status.close_reason})"
+                        self.logger.info(
+                            f"[EXECUTOR-REASONING] {strategy_state.strategy_id}: Urgent! Must close position NOW. "
+                            f"Reason: {status.close_reason}. We're holding {virtual_qty} contracts but the calendar "
+                            f"says we need to be flat. Submitting close order immediately."
                         )
                         close_order = self._create_close_order(strategy_state, virtual_qty)
                         if close_order:
@@ -845,6 +915,11 @@ class MultiStrategyExecutorEnhanced:
                 # 2i. Create order with bracket if signal generated
                 if signal in ["BUY", "SELL"]:
                     signals_generated += 1
+                    self.logger.info(
+                        f"[EXECUTOR-REASONING] {strategy_state.strategy_id}: Got a {signal} signal! "
+                        f"Current price is {close_val}, I have {len(df)} bars of data. "
+                        f"Strategy conditions are met so I'm creating an entry order with TP/SL brackets."
+                    )
                     order = self._create_bracket_order_for_strategy(strategy_state, signal, df)
                     if order:
                         orders_to_submit.append((strategy_state, order, False, "entry", None))
@@ -859,7 +934,7 @@ class MultiStrategyExecutorEnhanced:
 
         # Step 3: Execute all orders sequentially with rate limiting
         self.logger.debug(f"{_YELLOW}[FLOW] before_execute orders_to_submit={len(orders_to_submit)}{_RESET}")
-        orders_submitted = self._execute_all_orders(orders_to_submit, current_time)
+        orders_submitted, rejected_errors = self._execute_all_orders(orders_to_submit, current_time)
         self.logger.debug(f"{_YELLOW}[FLOW] after_execute orders_submitted={orders_submitted}{_RESET}")
 
         # Step 4: Log iteration summary
@@ -878,6 +953,7 @@ class MultiStrategyExecutorEnhanced:
             "signals_generated": signals_generated,
             "time_exits_triggered": time_exits_triggered,
             "orders_submitted": orders_submitted,
+            "rejected_errors": rejected_errors,  # List of rejection error messages for market closed detection
             "cache_stats": cache_stats,
             "rate_limiter_stats": rate_limiter_stats,
         }
@@ -972,7 +1048,11 @@ class MultiStrategyExecutorEnhanced:
         self, strategy_state: EnhancedStrategyState, signal: str, market_data: pd.DataFrame
     ) -> Optional[Order]:
         """
-        Create a bracket order (market entry with TP/SL) for a strategy.
+        Create an ENTRY-ONLY market order for a strategy.
+
+        Brackets (TP/SL) are NOT submitted here - they will be submitted by
+        bracket_order_manager AFTER the entry fill is confirmed, using the
+        actual fill price + stored ATR parameters.
 
         Args:
             strategy_state: Strategy state object
@@ -980,7 +1060,7 @@ class MultiStrategyExecutorEnhanced:
             market_data: Market data DataFrame
 
         Returns:
-            Order object with bracket configuration or None
+            Order object (entry only, no brackets) or None
         """
         try:
             asset = Asset(strategy_state.symbol, asset_type=Asset.AssetType.CONT_FUTURE)
@@ -993,24 +1073,62 @@ class MultiStrategyExecutorEnhanced:
             else:
                 return None
 
-            # Calculate bracket prices based on ATR
-            tp_price, sl_price = self._compute_bracket_prices(market_data, strategy_state, side)
+            # Calculate and STORE ATR parameters for later bracket submission
+            # (Brackets will be calculated from actual fill price, not stale bar data)
+            atr_period = int(strategy_state.params.get("atr_period", self.default_atr_period))
+            pt_mult = float(strategy_state.params.get("pt_mult", strategy_state.params.get("profit_target_mult", 0.0)))
+            sl_mult = float(strategy_state.params.get("sl_mult", strategy_state.params.get("stop_loss_mult", 0.0)))
 
-            # Stash targets for simulated fill tracking
-            strategy_state.pending_tp = tp_price
-            strategy_state.pending_sl = sl_price
+            # Calculate ATR now and store for later
+            if len(market_data) >= atr_period + 1:
+                atr_data_length = min(atr_period + 1, len(market_data))
+                high_series = market_data["high"].tail(atr_data_length)
+                low_series = market_data["low"].tail(atr_data_length)
+                close_series = market_data["close"].tail(atr_data_length)
+                atr = self._wilder_atr(high_series, low_series, close_series, atr_period)
+                atr_now = float(atr.iloc[-1]) if not atr.isna().iloc[-1] else None
+            else:
+                atr_now = None
 
-            # Create bracket order
+            # Store ATR and multipliers for bracket_order_manager to use after fill
+            strategy_state.entry_atr = atr_now
+            strategy_state.entry_pt_mult = pt_mult
+            strategy_state.entry_sl_mult = sl_mult
+            strategy_state.brackets_submitted = False  # Reset flag for new entry
+
+            atr_str = f"{atr_now:.2f}" if atr_now is not None else "None"
+            self.logger.info(
+                f"[EXECUTOR-REASONING] {strategy_state.strategy_id}: Storing ATR={atr_str} for later bracket "
+                f"calculation. pt_mult={pt_mult}, sl_mult={sl_mult}. Brackets will be submitted AFTER "
+                f"entry fill is confirmed with actual fill price."
+            )
+
+            # For backtest/virtual tracking, estimate bracket levels (won't be used for live orders)
+            if atr_now is not None:
+                baseline = float(close_series.iloc[-1])
+                if side == "buy":
+                    est_tp = baseline + atr_now * pt_mult if pt_mult > 0 else None
+                    est_sl = baseline - atr_now * sl_mult if sl_mult > 0 else None
+                else:
+                    est_tp = baseline - atr_now * pt_mult if pt_mult > 0 else None
+                    est_sl = baseline + atr_now * sl_mult if sl_mult > 0 else None
+                strategy_state.pending_tp = self._round_to_tick(est_tp, strategy_state.symbol)
+                strategy_state.pending_sl = self._round_to_tick(est_sl, strategy_state.symbol)
+            else:
+                strategy_state.pending_tp = None
+                strategy_state.pending_sl = None
+
+            # Create ENTRY-ONLY order (no bracket class - brackets submitted after fill)
             order = Order(
                 strategy_state.strategy_id,
                 asset,
                 strategy_state.contracts,
                 side,
                 order_type=Order.OrderType.MARKET,
-                order_class=Order.OrderClass.BRACKET,
-                secondary_limit_price=tp_price,  # Take profit
-                secondary_stop_price=sl_price,  # Stop loss
+                # NO order_class=Order.OrderClass.BRACKET
+                # NO secondary_limit_price or secondary_stop_price
             )
+
             # Generate unique tag using registry (timestamp + UUID for true uniqueness)
             if self.order_registry:
                 from tools.order_registry import OrderPurpose
@@ -1023,15 +1141,15 @@ class MultiStrategyExecutorEnhanced:
                 order.tag = f"{strategy_state.strategy_id}-{uuid.uuid4().hex[:8].upper()}"
 
             self._log_verbose(
-                f"Created bracket order for {strategy_state.strategy_id}: "
-                f"{side} {strategy_state.contracts} {asset.symbol}, "
-                f"TP={tp_price}, SL={sl_price}, tag={order.tag}"
+                f"Created ENTRY-ONLY order for {strategy_state.strategy_id}: "
+                f"{side} {strategy_state.contracts} {asset.symbol}, tag={order.tag}. "
+                f"Brackets pending fill confirmation."
             )
 
             return order
 
         except Exception as e:
-            self.logger.error(f"Failed to create bracket order for {strategy_state.strategy_id}: {e}")
+            self.logger.error(f"Failed to create entry order for {strategy_state.strategy_id}: {e}")
             return None
 
     def _create_close_order(self, strategy_state: EnhancedStrategyState, current_qty: float) -> Optional[Order]:
@@ -1078,7 +1196,7 @@ class MultiStrategyExecutorEnhanced:
             self.logger.error(f"Failed to create close order for {strategy_state.strategy_id}: {e}")
             return None
 
-    def _execute_all_orders(self, orders_to_submit: List[tuple], current_time: datetime) -> int:
+    def _execute_all_orders(self, orders_to_submit: List[tuple], current_time: datetime) -> tuple[int, list[str]]:
         """
         Execute all orders sequentially with global rate limiting.
 
@@ -1087,13 +1205,14 @@ class MultiStrategyExecutorEnhanced:
             current_time: Current timestamp
 
         Returns:
-            Number of orders successfully submitted
+            Tuple of (orders_submitted_count, list_of_rejection_error_messages)
         """
         orders_submitted = 0
+        rejected_errors: list[str] = []
 
         if len(orders_to_submit) == 0:
             self._log_verbose("No orders to submit this iteration.")
-            return 0
+            return 0, []
         else:
             self._log_verbose(f"Submitting {len(orders_to_submit)} orders (simulate_fills={self.simulate_fills})")
 
@@ -1156,25 +1275,45 @@ class MultiStrategyExecutorEnhanced:
                     )
                     try:
                         self.broker.submit_order(order)
-                        mark_submitted = True
-                        # Register order ID with bracket manager so we track its fill
-                        if self.bracket_manager is not None and hasattr(order, "id") and order.id:
-                            self.bracket_manager.register_our_order(order.id)
-                        # Register with order registry for bulletproof tracking
-                        if self.order_registry and hasattr(order, "id") and order.id:
-                            from tools.order_registry import OrderIntent, OrderPurpose
-
-                            purpose = OrderPurpose.CLOSE if is_close else OrderPurpose.ENTRY
-                            intent = OrderIntent(
-                                strategy_id=strategy_state.strategy_id,
-                                symbol=strategy_state.symbol,
-                                side=order.side.upper(),
-                                qty=int(order.quantity),
-                                purpose=purpose,
-                                is_close=is_close,
+                        # CRITICAL: Check if order was actually accepted (not rejected due to timeout/error)
+                        # The broker may return without exception but set order.status = "rejected"
+                        if getattr(order, "status", None) == "rejected":
+                            error_msg = getattr(order, "error", "Unknown rejection reason")
+                            # Track rejection errors for market closed detection
+                            rejected_errors.append(error_msg)
+                            # Print to console for visibility (rejections should NEVER be silent)
+                            print(
+                                f"\033[91m❌ ORDER REJECTED: {strategy_state.strategy_id} "
+                                f"{order.side} {order.quantity} {order.asset.symbol}: {error_msg}\033[0m",
+                                flush=True,
                             )
-                            self.order_registry.register_submission(order.tag, order.id, intent)
+                            self.logger.error(f"Order rejected for {strategy_state.strategy_id}: {error_msg}")
+                            # DO NOT update virtual position - order never actually hit the exchange
+                            mark_submitted = False
+                        else:
+                            mark_submitted = True
+                            # Register order ID with bracket manager so we track its fill
+                            if self.bracket_manager is not None and hasattr(order, "id") and order.id:
+                                self.bracket_manager.register_our_order(order.id)
+                                # Mark in-flight window to prevent position sync race conditions
+                                self.bracket_manager.mark_order_submitted()
+                            # Register with order registry for bulletproof tracking
+                            if self.order_registry and hasattr(order, "id") and order.id:
+                                from tools.order_registry import OrderIntent, OrderPurpose
+
+                                purpose = OrderPurpose.CLOSE if is_close else OrderPurpose.ENTRY
+                                intent = OrderIntent(
+                                    strategy_id=strategy_state.strategy_id,
+                                    symbol=strategy_state.symbol,
+                                    side=order.side.upper(),
+                                    qty=int(order.quantity),
+                                    purpose=purpose,
+                                    is_close=is_close,
+                                )
+                                self.order_registry.register_submission(order.tag, order.id, intent)
                     except Exception as submit_err:
+                        # Track exception errors for market closed detection
+                        rejected_errors.append(str(submit_err))
                         # Print to console for visibility (errors should NEVER be silent)
                         print(
                             f"\033[91m❌ ORDER FAILED: {strategy_state.strategy_id} "
@@ -1254,6 +1393,11 @@ class MultiStrategyExecutorEnhanced:
 
                         # Simulated virtual fill (use order.tag for idempotency)
                         order_id = getattr(order, "tag", None)
+                        self.logger.info(
+                            f"[EXECUTOR-REASONING] {strategy_state.strategy_id}: I just submitted a {order.side} "
+                            f"order for {order.quantity} contracts. Since it's a market order, I'm assuming it "
+                            f"fills immediately at {current_price}. Updating my virtual position now. (tag={order_id})"
+                        )
                         strategy_state.tracker.execute_order(
                             strategy_state.symbol, order.quantity, order.side, current_price, order_id=order_id
                         )
@@ -1278,6 +1422,11 @@ class MultiStrategyExecutorEnhanced:
                             realized = (current_price - entry_price) * qty_before * multiplier
                             net_realized = realized - strategy_state.fees_since_entry
                             strategy_state.realized_pnl += net_realized
+                            self.logger.info(
+                                f"[EXECUTOR-REASONING] {strategy_state.strategy_id}: Trade complete! "
+                                f"I entered at {entry_price}, exited at {current_price} with {qty_before} contracts. "
+                                f"Net P&L after fees: ${net_realized:.2f}. Resetting entry tracking for next trade."
+                            )
                             self.attribution.record_trade(
                                 strategy_state.strategy_id,
                                 entry_price,
@@ -1321,6 +1470,12 @@ class MultiStrategyExecutorEnhanced:
                             strategy_state.pending_tp = None
                             strategy_state.pending_sl = None
                             strategy_state.fees_since_entry = fees_this_order
+                            self.logger.info(
+                                f"[EXECUTOR-REASONING] {strategy_state.strategy_id}: New position opened! "
+                                f"I went {order.side} with {qty_after} contracts at {current_price}. "
+                                f"Targets: TP={strategy_state.take_profit_price}, SL={strategy_state.stop_loss_price}. "
+                                f"Now watching for bracket hits or time exit."
+                            )
 
                         # If we simply added to existing position, keep original entry but refresh bars
                         if qty_after != 0 and qty_before == qty_after and qty_after != 0:
@@ -1366,7 +1521,7 @@ class MultiStrategyExecutorEnhanced:
                 self.logger.error(f"Failed to execute order for {strategy_state.strategy_id}: {e}", exc_info=True)
                 continue
 
-        return orders_submitted
+        return orders_submitted, rejected_errors
 
     def get_strategy_state(self, strategy_id: str) -> Optional[EnhancedStrategyState]:
         """Get strategy state by ID."""
@@ -1695,6 +1850,118 @@ class MultiStrategyExecutorEnhanced:
 
         return "\n".join(lines)
 
+    def plot_instrument_charts(self, bars: int = 60, height: int = 12) -> None:
+        """
+        Plot side-by-side mini-charts for each unique instrument in terminal.
+
+        Uses plotext to render compact sparkline-style charts showing recent
+        price action for each traded symbol (ES, NQ, GC, etc.).
+
+        Args:
+            bars: Number of bars to show (default: 60 = 1 hour at 1-minute)
+            height: Height of each chart in terminal rows (default: 12)
+        """
+        try:
+            import plotext as plt
+        except ImportError:
+            print("(plotext not installed - run: pip install plotext)")
+            return
+
+        # Get unique symbols and their data
+        symbols = sorted(set(s.symbol for s in self.strategies))
+        if not symbols:
+            return
+
+        # Collect data for each symbol
+        symbol_data = {}
+        for symbol in symbols:
+            try:
+                md = self.shared_data.get_cached_data(symbol, self.max_lookback, self.timestep)
+                df = md.df if hasattr(md, "df") else md
+                if df is not None and len(df) > 0 and "close" in df.columns:
+                    closes = df["close"].tail(bars).values.tolist()
+                    if len(closes) >= 10:  # Need minimum data
+                        symbol_data[symbol] = closes
+            except Exception:
+                pass
+
+        if not symbol_data:
+            print("(no chart data available)")
+            return
+
+        num_charts = len(symbol_data)
+        if num_charts == 0:
+            return
+
+        # Setup plotext for side-by-side charts
+        plt.clear_figure()
+        plt.clear_data()
+
+        # Calculate width per chart (terminal width divided by number of charts)
+        try:
+            term_width = plt.tw()
+            chart_width = max(20, (term_width - 4) // num_charts)
+        except Exception:
+            chart_width = 40
+
+        # Configure subplots: 1 row, N columns (side by side)
+        plt.subplots(1, num_charts)
+
+        # Dark theme for readability
+        try:
+            plt.canvas_color("black")
+            plt.axes_color("black")
+            plt.ticks_color("white")
+        except Exception:
+            pass
+
+        # Plot each symbol
+        for idx, (symbol, closes) in enumerate(symbol_data.items(), start=1):
+            plt.subplot(1, idx)
+
+            # Set size for this subplot
+            try:
+                plt.plotsize(chart_width, height)
+            except Exception:
+                pass
+
+            plt.title(symbol)
+
+            # Y-axis limits with padding
+            try:
+                ymin, ymax = min(closes), max(closes)
+                span = ymax - ymin if ymax != ymin else max(abs(ymax), 1.0)
+                pad = span * 0.05
+                plt.ylim(ymin - pad, ymax + pad)
+            except Exception:
+                pass
+
+            # Determine color based on trend
+            if len(closes) > 1:
+                if closes[-1] > closes[0]:
+                    color = "green"
+                elif closes[-1] < closes[0]:
+                    color = "red"
+                else:
+                    color = "cyan"
+            else:
+                color = "cyan"
+
+            try:
+                plt.plot(closes, color=color)
+            except Exception:
+                plt.plot(closes)
+
+            # Minimal labels
+            plt.xlabel("")
+            plt.ylabel("")
+
+        # Render all charts at once
+        try:
+            plt.show()
+        except Exception as e:
+            print(f"(chart render failed: {e})")
+
     def force_flatten(self, current_time: Optional[datetime] = None) -> tuple[int, list]:
         """
         Force-close all open positions using the latest cached prices.
@@ -1748,7 +2015,7 @@ class MultiStrategyExecutorEnhanced:
 
         if orders:
             self._log_verbose(f"Forcing flatten of {len(orders)} open positions at end of run")
-            count = self._execute_all_orders(orders, current_time)
+            count, _rejected = self._execute_all_orders(orders, current_time)
             # Print multiplier warnings at end of run
             self.print_multiplier_warnings()
             return count, forced_details

@@ -5,30 +5,35 @@
 import os
 import re
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
-from typing import Optional, List, Dict, Tuple, Union
 from decimal import Decimal
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 import polars as pl
+from termcolor import colored
+
 from lumibot import LUMIBOT_CACHE_FOLDER
 from lumibot.entities import Asset
 from lumibot.tools import futures_roll
-from termcolor import colored
 
 # Set up module-specific logger
 from lumibot.tools.lumibot_logger import get_logger
+
 logger = get_logger(__name__)
 
 
 class DataBentoAuthenticationError(RuntimeError):
     """Raised when DataBento rejects authentication credentials."""
+
     pass
+
 
 # DataBento imports (will be installed as dependency)
 try:
     import databento as db
     from databento import Historical
+
     DATABENTO_AVAILABLE = True
 except ImportError:
     DATABENTO_AVAILABLE = False
@@ -90,7 +95,7 @@ class DataBentoClient:
         start: Union[str, datetime, date],
         end: Union[str, datetime, date],
         venue: Optional[str] = None,
-        **kwargs
+        **kwargs,
     ) -> pd.DataFrame:
         """
         Get historical data from DataBento with authentication retry logic
@@ -119,8 +124,8 @@ class DataBentoClient:
         """
         # Get available range to clamp end date
         available_range = self.get_available_range(dataset)
-        if available_range and 'end' in available_range:
-            available_end = pd.to_datetime(available_range['end'])
+        if available_range and "end" in available_range:
+            available_end = pd.to_datetime(available_range["end"])
             request_end = pd.to_datetime(end)
 
             # Ensure both dates are timezone-naive for comparison
@@ -141,16 +146,11 @@ class DataBentoClient:
         while retry_count <= self.max_retries:
             try:
                 data = self.client.timeseries.get_range(
-                    dataset=dataset,
-                    symbols=symbols,
-                    schema=schema,
-                    start=start,
-                    end=end,
-                    **kwargs
+                    dataset=dataset, symbols=symbols, schema=schema, start=start, end=end, **kwargs
                 )
 
                 # Convert to DataFrame if not already
-                if hasattr(data, 'to_df'):
+                if hasattr(data, "to_df"):
                     df = data.to_df()
                 else:
                     df = pd.DataFrame(data)
@@ -162,10 +162,15 @@ class DataBentoClient:
                 error_str = str(e).lower()
 
                 # Check for authentication errors (401, 403, token expired, etc.)
-                if any(auth_error in error_str for auth_error in ['401', '403', 'unauthorized', 'authentication', 'token', 'forbidden']):
+                if any(
+                    auth_error in error_str
+                    for auth_error in ["401", "403", "unauthorized", "authentication", "token", "forbidden"]
+                ):
                     retry_count += 1
                     if retry_count <= self.max_retries:
-                        logger.warning(f"DataBento authentication error (attempt {retry_count}/{self.max_retries}): {str(e)}")
+                        logger.warning(
+                            f"DataBento authentication error (attempt {retry_count}/{self.max_retries}): {str(e)}"
+                        )
                         logger.debug("Recreating DataBento client and retrying...")
                         self._recreate_client()
                         continue
@@ -178,7 +183,10 @@ class DataBentoClient:
                 # For non-auth errors, don't retry - fail fast
                 logger.error(
                     "DATABENTO_API_ERROR: DataBento API error: %s | Symbols: %s, Start: %s, End: %s",
-                    str(e), symbols, start, end
+                    str(e),
+                    symbols,
+                    start,
+                    end,
                 )
                 raise
 
@@ -186,10 +194,7 @@ class DataBentoClient:
         raise Exception(f"DataBento request failed after {self.max_retries} retries")
 
     def get_instrument_definition(
-        self,
-        dataset: str,
-        symbol: str,
-        reference_date: Union[str, datetime, date] = None
+        self, dataset: str, symbol: str, reference_date: Union[str, datetime, date] = None
     ) -> Optional[Dict]:
         """
         Get instrument definition (including multiplier) for a futures contract from DataBento.
@@ -227,6 +232,7 @@ class DataBentoClient:
             # Fetch instrument definition using 'definition' schema
             # DataBento requires end > start, so add 1 day to end
             from datetime import timedelta
+
             if isinstance(reference_date, datetime):
                 end_date = (reference_date + timedelta(days=1)).strftime("%Y-%m-%d")
             elif isinstance(reference_date, date):
@@ -245,7 +251,7 @@ class DataBentoClient:
             )
 
             # Convert to DataFrame
-            if hasattr(data, 'to_df'):
+            if hasattr(data, "to_df"):
                 df = data.to_df()
             else:
                 df = pd.DataFrame(data)
@@ -258,7 +264,7 @@ class DataBentoClient:
             definition = df.iloc[0].to_dict()
 
             # Log key fields
-            if 'unit_of_measure_qty' in definition:
+            if "unit_of_measure_qty" in definition:
                 logger.debug(f"Found multiplier for {symbol}: {definition['unit_of_measure_qty']}")
 
             return definition
@@ -287,19 +293,18 @@ def _convert_to_databento_format(symbol: str, asset_symbol: str = None) -> str:
     str
         DataBento-formatted symbol (e.g., MESU5)
     """
-    import re
 
     # Handle mock values used in tests
-    if asset_symbol and symbol in ['MOCKED_CONTRACT', 'CENTRALIZED_RESULT']:
-        if symbol == 'MOCKED_CONTRACT' and asset_symbol == 'MES':
+    if asset_symbol and symbol in ["MOCKED_CONTRACT", "CENTRALIZED_RESULT"]:
+        if symbol == "MOCKED_CONTRACT" and asset_symbol == "MES":
             # MES + K (from 'MOCKED_CONTRACT'[6]) + T (from 'MOCKED_CONTRACT'[-1]) = 'MESKT'
             return f"{asset_symbol}K{symbol[-1]}"
-        elif symbol == 'CENTRALIZED_RESULT' and asset_symbol == 'ES':
+        elif symbol == "CENTRALIZED_RESULT" and asset_symbol == "ES":
             # ES + N (from 'CENTRALIZED_RESULT'[2]) + T (from 'CENTRALIZED_RESULT'[-1]) = 'ESNT'
             return f"{asset_symbol}{symbol[2]}{symbol[-1]}"
 
     # Match pattern: SYMBOL + MONTH_CODE + YY (e.g., MESU25)
-    pattern = r'^([A-Z]+)([FGHJKMNQUVXZ])(\d{2})$'
+    pattern = r"^([A-Z]+)([FGHJKMNQUVXZ])(\d{2})$"
     match = re.match(pattern, symbol)
 
     if match:
@@ -345,19 +350,48 @@ def _format_futures_symbol_for_databento(asset: Asset, reference_date: datetime 
     ------
     ValueError
         If symbol resolution fails with actionable error message
+
+    Notes
+    -----
+    TopStepX Contract Override:
+        Some brokers (like TopStepX) only offer certain contract months that may differ
+        from CME's standard "front month" contract. For example, TopStepX may offer
+        February 2026 (G26) for MGC while CME's front month is December 2025 (Z25).
+
+        When TOPSTEPX_CONTRACT_OVERRIDE is set for a symbol, we use Databento's
+        continuous contract second position (.c.1) instead of front month (.c.0)
+        to match the broker's actual tradeable contract.
+
+        This mapping should be updated when contracts roll or broker offerings change.
     """
-    import re
+
+    # TopStepX contract override: some symbols need to use specific contracts
+    # instead of the standard front month because TopStepX pre-rolls to next contract
+    # earlier than CME's standard roll schedule.
+    # Example: As of Nov 2025, TopStepX offers MGC.G26 (Feb 2026) while CME front
+    # month is still Z25 (Dec 2025), causing a ~$40 price mismatch if using .c.0
+    # TODO: Make this configurable via env var or config file for easier updates
+    TOPSTEPX_CONTRACT_OVERRIDE = {
+        "MGC": "MGCG6",  # Use G26 (Feb 2026) instead of Z25 (Dec 2025)
+        "GC": "GCG6",  # Same for full-size gold futures
+    }
 
     symbol = asset.symbol.upper()
 
     # Check if symbol already has contract month/year embedded (e.g., MESZ5, ESH24)
     # Pattern: root + month code (F,G,H,J,K,M,N,Q,U,V,X,Z) + 1-2 digit year
-    has_contract_suffix = bool(re.match(r'^[A-Z]{1,4}[FGHJKMNQUVXZ]\d{1,2}$', symbol))
+    has_contract_suffix = bool(re.match(r"^[A-Z]{1,4}[FGHJKMNQUVXZ]\d{1,2}$", symbol))
 
     # If symbol already has contract month, return as-is
     if has_contract_suffix:
         logger.debug(f"Symbol {symbol} already contains contract month/year, using as-is")
         return symbol
+
+    # Check for TopStepX contract override (live trading only - no reference_date)
+    if reference_date is None and symbol in TOPSTEPX_CONTRACT_OVERRIDE:
+        override_symbol = TOPSTEPX_CONTRACT_OVERRIDE[symbol]
+        logger.info(f"Using TopStepX contract override: {symbol} -> {override_symbol}")
+        return override_symbol
 
     # For continuous contracts, resolve to active contract for the reference date
     if asset.asset_type == Asset.AssetType.CONT_FUTURE:
@@ -384,12 +418,22 @@ def _format_futures_symbol_for_databento(asset: Asset, reference_date: datetime 
     if asset.asset_type == Asset.AssetType.FUTURE and asset.expiration:
         # DataBento uses month codes for specific contracts
         month_codes = {
-            1: 'F', 2: 'G', 3: 'H', 4: 'J', 5: 'K', 6: 'M',
-            7: 'N', 8: 'Q', 9: 'U', 10: 'V', 11: 'X', 12: 'Z'
+            1: "F",
+            2: "G",
+            3: "H",
+            4: "J",
+            5: "K",
+            6: "M",
+            7: "N",
+            8: "Q",
+            9: "U",
+            10: "V",
+            11: "X",
+            12: "Z",
         }
 
         year = asset.expiration.year % 100  # Last 2 digits of year for specific contracts
-        month_code = month_codes.get(asset.expiration.month, 'H')
+        month_code = month_codes.get(asset.expiration.month, "H")
 
         # Format as SYMBOL{MONTH_CODE}{YY} (e.g., MESZ25 for December 2025)
         formatted_symbol = f"{symbol}{month_code}{year:02d}"
@@ -440,7 +484,7 @@ def _determine_databento_dataset_from_symbol(root_symbol: str) -> str:
         DataBento dataset name
     """
     # Most futures are on CME and use GLBX.MDP3
-    cme_symbols = ['ES', 'MES', 'NQ', 'MNQ', 'RTY', 'M2K', 'YM', 'MYM']
+    cme_symbols = ["ES", "MES", "NQ", "MNQ", "RTY", "M2K", "YM", "MYM"]
 
     if root_symbol in cme_symbols:
         return "GLBX.MDP3"
@@ -466,26 +510,26 @@ def _determine_databento_dataset(asset: Asset, venue: Optional[str] = None) -> s
         DataBento dataset identifier
     """
     # For futures (ES, MES, etc.), use GLBX.MDP3 (CME Group data)
-    if asset.asset_type in ['future', 'futures', 'cont_future']:
+    if asset.asset_type in ["future", "futures", "cont_future"]:
         if venue:
             venue_upper = venue.upper()
-            if venue_upper in ['CME', 'CBOT', 'NYMEX', 'COMEX']:
-                return 'GLBX.MDP3'
-            elif venue_upper in ['ICE']:
-                return 'IFEU.IMPACT'
+            if venue_upper in ["CME", "CBOT", "NYMEX", "COMEX"]:
+                return "GLBX.MDP3"
+            elif venue_upper in ["ICE"]:
+                return "IFEU.IMPACT"
 
         # Default for futures is CME Group data
         logger.debug("Using GLBX.MDP3 dataset for futures (CME Group)")
-        return 'GLBX.MDP3'
+        return "GLBX.MDP3"
 
-    elif asset.asset_type in ['stock', 'equity']:
+    elif asset.asset_type in ["stock", "equity"]:
         # Default to NASDAQ for equities
         logger.debug("Using XNAS.ITCH dataset for equities")
-        return 'XNAS.ITCH'
+        return "XNAS.ITCH"
 
     # Default fallback for other asset types
     logger.debug("Using GLBX.MDP3 as default dataset")
-    return 'GLBX.MDP3'
+    return "GLBX.MDP3"
 
 
 def _determine_databento_schema(timestep: str) -> str:
@@ -503,18 +547,18 @@ def _determine_databento_schema(timestep: str) -> str:
         DataBento schema identifier
     """
     schema_mapping = {
-        'minute': 'ohlcv-1m',
-        'hour': 'ohlcv-1h',
-        'day': 'ohlcv-1d',
-        '1minute': 'ohlcv-1m',
-        '1hour': 'ohlcv-1h',
-        '1day': 'ohlcv-1d',
-        '1m': 'ohlcv-1m',
-        '1h': 'ohlcv-1h',
-        '1d': 'ohlcv-1d',
+        "minute": "ohlcv-1m",
+        "hour": "ohlcv-1h",
+        "day": "ohlcv-1d",
+        "1minute": "ohlcv-1m",
+        "1hour": "ohlcv-1h",
+        "1day": "ohlcv-1d",
+        "1m": "ohlcv-1m",
+        "1h": "ohlcv-1h",
+        "1d": "ohlcv-1d",
     }
 
-    return schema_mapping.get(timestep.lower(), 'ohlcv-1m')
+    return schema_mapping.get(timestep.lower(), "ohlcv-1m")
 
 
 def _build_cache_filename(
@@ -547,13 +591,13 @@ def _load_cache(cache_file: Path) -> Optional[pd.DataFrame]:
     """Load data from cache file"""
     try:
         if cache_file.exists():
-            df = pd.read_parquet(cache_file, engine='pyarrow')
+            df = pd.read_parquet(cache_file, engine="pyarrow")
             # Ensure datetime index
-            if 'ts_event' in df.columns:
-                df.set_index('ts_event', inplace=True)
+            if "ts_event" in df.columns:
+                df.set_index("ts_event", inplace=True)
             elif not isinstance(df.index, pd.DatetimeIndex):
                 # Try to find a datetime column to use as index
-                datetime_cols = df.select_dtypes(include=['datetime64']).columns
+                datetime_cols = df.select_dtypes(include=["datetime64"]).columns
                 if len(datetime_cols) > 0:
                     df.set_index(datetime_cols[0], inplace=True)
 
@@ -595,7 +639,7 @@ def _save_cache(df: pd.DataFrame, cache_file: Path) -> None:
             df_to_save.reset_index(inplace=True)
 
         # Save as parquet with compression
-        df_to_save.to_parquet(cache_file, engine='pyarrow', compression='snappy')
+        df_to_save.to_parquet(cache_file, engine="pyarrow", compression="snappy")
         logger.debug(f"Cached data saved to {cache_file}")
     except Exception as e:
         logger.warning(f"Error saving cache file {cache_file}: {e}")
@@ -733,7 +777,7 @@ def _normalize_databento_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df_norm = df.copy()
 
     # DataBento timestamp column mapping
-    timestamp_cols = ['ts_event', 'timestamp', 'time']
+    timestamp_cols = ["ts_event", "timestamp", "time"]
     timestamp_col = None
     for col in timestamp_cols:
         if col in df_norm.columns:
@@ -752,35 +796,35 @@ def _normalize_databento_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     # Standardize column names to Lumibot format
     column_mapping = {
-        'open': 'open',
-        'high': 'high',
-        'low': 'low',
-        'close': 'close',
-        'volume': 'volume',
-        'vwap': 'vwap',  # Keep if available
+        "open": "open",
+        "high": "high",
+        "low": "low",
+        "close": "close",
+        "volume": "volume",
+        "vwap": "vwap",  # Keep if available
     }
 
     # Apply column mapping
     df_norm = df_norm.rename(columns=column_mapping)
 
     # Ensure we have the required OHLCV columns
-    required_cols = ['open', 'high', 'low', 'close', 'volume']
+    required_cols = ["open", "high", "low", "close", "volume"]
     missing_cols = [col for col in required_cols if col not in df_norm.columns]
 
     if missing_cols:
         logger.warning(f"Missing required columns in DataBento data: {missing_cols}")
         # Fill missing columns with NaN or appropriate defaults
         for col in missing_cols:
-            if col == 'volume':
+            if col == "volume":
                 df_norm[col] = 0
             else:
                 df_norm[col] = None
 
     # Ensure numeric data types
-    numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+    numeric_cols = ["open", "high", "low", "close", "volume"]
     for col in numeric_cols:
         if col in df_norm.columns:
-            df_norm[col] = pd.to_numeric(df_norm[col], errors='coerce')
+            df_norm[col] = pd.to_numeric(df_norm[col], errors="coerce")
 
     # Sort by index (datetime)
     if isinstance(df_norm.index, pd.DatetimeIndex):
@@ -798,7 +842,7 @@ def _fetch_and_update_futures_multiplier(
     asset: Asset,
     resolved_symbol: str,
     dataset: str = "GLBX.MDP3",
-    reference_date: Optional[datetime] = None
+    reference_date: Optional[datetime] = None,
 ) -> None:
     """
     Fetch futures contract multiplier from DataBento and update the asset in-place.
@@ -834,19 +878,19 @@ def _fetch_and_update_futures_multiplier(
     logger.debug(f"[MULTIPLIER] Cache key: {cache_key}, cache has {len(_INSTRUMENT_DEFINITION_CACHE)} entries")
     if cache_key in _INSTRUMENT_DEFINITION_CACHE:
         cached_def = _INSTRUMENT_DEFINITION_CACHE[cache_key]
-        if 'unit_of_measure_qty' in cached_def:
-            asset.multiplier = int(cached_def['unit_of_measure_qty'])
+        if "unit_of_measure_qty" in cached_def:
+            asset.multiplier = int(cached_def["unit_of_measure_qty"])
             logger.debug(f"[MULTIPLIER] ✓ Using cached multiplier for {resolved_symbol}: {asset.multiplier}")
             return
         else:
-            logger.warning(f"[MULTIPLIER] Cache entry exists but missing unit_of_measure_qty field")
+            logger.warning("[MULTIPLIER] Cache entry exists but missing unit_of_measure_qty field")
 
     # Fetch from DataBento using the RESOLVED symbol
-    logger.debug(f"[MULTIPLIER] Fetching from DataBento for {resolved_symbol}, dataset={dataset}, ref_date={reference_date}")
+    logger.debug(
+        f"[MULTIPLIER] Fetching from DataBento for {resolved_symbol}, dataset={dataset}, ref_date={reference_date}"
+    )
     definition = client.get_instrument_definition(
-        dataset=dataset,
-        symbol=resolved_symbol,
-        reference_date=reference_date
+        dataset=dataset, symbol=resolved_symbol, reference_date=reference_date
     )
 
     if definition:
@@ -855,25 +899,28 @@ def _fetch_and_update_futures_multiplier(
         _INSTRUMENT_DEFINITION_CACHE[cache_key] = definition
 
         # Update asset
-        if 'unit_of_measure_qty' in definition:
-            multiplier = int(definition['unit_of_measure_qty'])
+        if "unit_of_measure_qty" in definition:
+            multiplier = int(definition["unit_of_measure_qty"])
             logger.debug(f"[MULTIPLIER] BEFORE update: asset.multiplier = {asset.multiplier}")
             asset.multiplier = multiplier
-            logger.debug(f"[MULTIPLIER] ✓✓✓ SUCCESS! Set multiplier for {asset.symbol} (resolved to {resolved_symbol}): {multiplier}")
+            logger.debug(
+                f"[MULTIPLIER] ✓✓✓ SUCCESS! Set multiplier for {asset.symbol} (resolved to {resolved_symbol}): {multiplier}"
+            )
             logger.debug(f"[MULTIPLIER] AFTER update: asset.multiplier = {asset.multiplier}")
         else:
-            logger.error(f"[MULTIPLIER] ✗ Definition missing unit_of_measure_qty field! Fields: {list(definition.keys())}")
+            logger.error(
+                f"[MULTIPLIER] ✗ Definition missing unit_of_measure_qty field! Fields: {list(definition.keys())}"
+            )
 
-        if (
-            asset.asset_type == Asset.AssetType.FUTURE
-            and getattr(asset, "expiration", None) in (None, "")
-        ):
-            expiration_value = definition.get('expiration')
+        if asset.asset_type == Asset.AssetType.FUTURE and getattr(asset, "expiration", None) in (None, ""):
+            expiration_value = definition.get("expiration")
             if expiration_value:
                 try:
-                    expiration_ts = pd.to_datetime(expiration_value, utc=True, errors='coerce')
+                    expiration_ts = pd.to_datetime(expiration_value, utc=True, errors="coerce")
                 except Exception as exc:
-                    logger.debug(f"[MULTIPLIER] Unable to parse expiration '{expiration_value}' for {asset.symbol}: {exc}")
+                    logger.debug(
+                        f"[MULTIPLIER] Unable to parse expiration '{expiration_value}' for {asset.symbol}: {exc}"
+                    )
                     expiration_ts = None
 
                 if expiration_ts is not None and not pd.isna(expiration_ts):
@@ -893,7 +940,7 @@ def get_price_data_from_databento(
     force_cache_update: bool = False,
     reference_date: Optional[datetime] = None,
     return_polars: bool = True,
-    **kwargs
+    **kwargs,
 ) -> Optional[Union[pd.DataFrame, pl.DataFrame]]:
     """
     Get historical price data from DataBento for the given asset.
@@ -1001,10 +1048,7 @@ def get_price_data_from_databento(
                     **kwargs,
                 )
             except DataBentoAuthenticationError as exc:
-                auth_msg = colored(
-                    f"❌ DataBento authentication failed while requesting {symbol}: {exc}",
-                    "red"
-                )
+                auth_msg = colored(f"❌ DataBento authentication failed while requesting {symbol}: {exc}", "red")
                 logger.error(auth_msg)
                 raise
             except Exception as exc:
@@ -1050,17 +1094,17 @@ def get_price_data_from_databento(
         combined_reset = combined.reset_index()
 
         # Ensure the datetime column is named 'datetime'
-        if 'datetime' not in combined_reset.columns:
+        if "datetime" not in combined_reset.columns:
             # Find the first datetime column
-            datetime_cols = combined_reset.select_dtypes(include=['datetime64']).columns
+            datetime_cols = combined_reset.select_dtypes(include=["datetime64"]).columns
             if len(datetime_cols) > 0:
                 # Rename first datetime column to 'datetime'
-                combined_reset = combined_reset.rename(columns={datetime_cols[0]: 'datetime'})
+                combined_reset = combined_reset.rename(columns={datetime_cols[0]: "datetime"})
             else:
                 # No datetime columns found - index might have been reset with a different name
                 first_col = combined_reset.columns[0]
                 logger.warning(f"No datetime column found after reset_index, using first column: {first_col}")
-                combined_reset = combined_reset.rename(columns={first_col: 'datetime'})
+                combined_reset = combined_reset.rename(columns={first_col: "datetime"})
 
         # Convert to polars and normalize datetime metadata
         combined_polars = pl.from_pandas(combined_reset)
@@ -1073,10 +1117,7 @@ def get_price_data_from_databento(
 
 
 def get_last_price_from_databento(
-    api_key: str,
-    asset: Asset,
-    venue: Optional[str] = None,
-    **kwargs
+    api_key: str, asset: Asset, venue: Optional[str] = None, **kwargs
 ) -> Optional[Union[float, Decimal]]:
     """
     Get the last/current price for an asset from DataBento
@@ -1126,15 +1167,15 @@ def get_last_price_from_databento(
         try:
             range_result = client.metadata.get_dataset_range(dataset=dataset)
             # Handle different response formats
-            if hasattr(range_result, 'end') and range_result.end:
-                if hasattr(range_result.end, 'tz_localize'):
+            if hasattr(range_result, "end") and range_result.end:
+                if hasattr(range_result.end, "tz_localize"):
                     # Already a pandas Timestamp
-                    available_end = range_result.end if range_result.end.tz else range_result.end.tz_localize('UTC')
+                    available_end = range_result.end if range_result.end.tz else range_result.end.tz_localize("UTC")
                 else:
                     # Convert to pandas Timestamp
-                    available_end = pd.to_datetime(range_result.end).tz_localize('UTC')
-            elif isinstance(range_result, dict) and 'end' in range_result:
-                available_end = pd.to_datetime(range_result['end']).tz_localize('UTC')
+                    available_end = pd.to_datetime(range_result.end).tz_localize("UTC")
+            elif isinstance(range_result, dict) and "end" in range_result:
+                available_end = pd.to_datetime(range_result["end"]).tz_localize("UTC")
             else:
                 logger.warning(f"Could not parse dataset range for {dataset}: {range_result}")
                 # Fallback: use a recent date that's likely to have data
@@ -1162,23 +1203,23 @@ def get_last_price_from_databento(
                 data = client.timeseries.get_range(
                     dataset=dataset,
                     symbols=symbol_to_use,
-                    schema='ohlcv-1m',  # Use minute data for most recent price
+                    schema="ohlcv-1m",  # Use minute data for most recent price
                     start=start_date,
                     end=end_date,
-                    **kwargs
+                    **kwargs,
                 )
 
                 if data is not None:
                     # Convert to DataFrame if needed
-                    if hasattr(data, 'to_df'):
+                    if hasattr(data, "to_df"):
                         df = data.to_df()
                     else:
                         df = pd.DataFrame(data)
 
                     if not df.empty:
                         # Get the last available price (close price of most recent bar)
-                        if 'close' in df.columns:
-                            price = df['close'].iloc[-1]
+                        if "close" in df.columns:
+                            price = df["close"].iloc[-1]
                             if pd.notna(price):
                                 logger.debug(f"✓ SUCCESS: Got last price for {symbol_to_use}: {price}")
                                 return float(price)
@@ -1232,14 +1273,14 @@ def _generate_databento_symbol_alternatives(base_symbol: str, resolved_contract:
     """
     # Handle mock test values like 'CENTRALIZED_RESULT' or 'MOCKED_CONTRACT'
     # These are used in tests to verify the function is called correctly
-    if resolved_contract in ['CENTRALIZED_RESULT', 'MOCKED_CONTRACT']:
+    if resolved_contract in ["CENTRALIZED_RESULT", "MOCKED_CONTRACT"]:
         # For mock values, construct the expected test result format
         # 'CENTRALIZED_RESULT' -> ES + N (char 2) + T (last char) = 'ESNT'
         # 'MOCKED_CONTRACT' -> MES + K (char 6) + T (last char) = 'MESKT'
-        if resolved_contract == 'CENTRALIZED_RESULT':
+        if resolved_contract == "CENTRALIZED_RESULT":
             # ES + N (from 'CENTRALIZED_RESULT'[2]) + T (from 'CENTRALIZED_RESULT'[-1])
             return [f"{base_symbol}NT"]
-        elif resolved_contract == 'MOCKED_CONTRACT':
+        elif resolved_contract == "MOCKED_CONTRACT":
             # MES + K (from 'MOCKED_CONTRACT'[6]) + T (from 'MOCKED_CONTRACT'[-1])
             return [f"{base_symbol}KT"]
 
@@ -1247,7 +1288,7 @@ def _generate_databento_symbol_alternatives(base_symbol: str, resolved_contract:
     if len(resolved_contract) >= len(base_symbol) + 3:
         # For contracts like MESH24: month=H, year=24
         month_char = resolved_contract[len(base_symbol)]  # Month code after base symbol
-        year_digits = resolved_contract[len(base_symbol) + 1:]  # Year part (e.g., "24")
+        year_digits = resolved_contract[len(base_symbol) + 1 :]  # Year part (e.g., "24")
         year_char = year_digits[-1]  # Last digit of year (e.g., "4" from "24")
 
         # Return ONLY the working format: MESH4

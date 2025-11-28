@@ -6,8 +6,9 @@ Supports historical data retrieval for futures contracts.
 """
 
 from datetime import datetime, timedelta
-import pandas as pd
 from typing import Dict, List
+
+import pandas as pd
 
 from lumibot.constants import LUMIBOT_DEFAULT_PYTZ
 from lumibot.data_sources.data_source import DataSource
@@ -42,12 +43,12 @@ class ProjectXData(DataSource):
     # ProjectX time unit mappings (canonical mapping including seconds)
     # Maintain stable numeric IDs: second=1, minute=2, hour=3, day=4, week=5, month=6
     TIME_UNIT_MAPPING = {
-        "second": 1,    # Second bars
-        "minute": 2,    # Minute bars
-        "hour": 3,      # Hourly bars
-        "day": 4,       # Daily bars
-        "week": 5,      # Weekly bars
-        "month": 6,     # Monthly bars
+        "second": 1,  # Second bars
+        "minute": 2,  # Minute bars
+        "hour": 3,  # Hourly bars
+        "day": 4,  # Daily bars
+        "week": 5,  # Weekly bars
+        "month": 6,  # Monthly bars
     }
     SOURCE = "PROJECTX"
 
@@ -62,6 +63,7 @@ class ProjectXData(DataSource):
         # Use environment config if not provided
         if config is None:
             from lumibot.credentials import get_projectx_config
+
             config = get_projectx_config()
 
         self.config = config
@@ -92,12 +94,12 @@ class ProjectXData(DataSource):
 
         self.logger.info(f"ProjectX data source initialized for firm: {self.firm}")
         # Futures-only broker: set default market to US futures for downstream strategies
+
     # No implicit default_market attribute; strategies should call set_market('us_futures').
 
     # ========== Required DataSource Methods ==========
 
-    def get_last_price(self, asset: Asset, quote: Asset = None,
-                      exchange: str = None) -> float:
+    def get_last_price(self, asset: Asset, quote: Asset = None, exchange: str = None) -> float:
         """
         Get the last price for an asset.
 
@@ -132,8 +134,8 @@ class ProjectXData(DataSource):
                 return None
 
             latest = df.iloc[-1]
-            if 'close' in latest:
-                return float(latest['close'])
+            if "close" in latest:
+                return float(latest["close"])
             return None
         except Exception as e:
             self.logger.error(f"Error getting last price for {asset.symbol}: {e}")
@@ -173,33 +175,45 @@ class ProjectXData(DataSource):
             ask=ask,
             timestamp=timestamp,
             quote_time=timestamp,
-            raw_data={"source": "projectx_live_rest", "live": True}
+            raw_data={"source": "projectx_live_rest", "live": True},
         )
 
     def get_bars(
-            self, 
-            assets, 
-            length, 
-            timestep="minute", 
-            timeshift=None, 
-            chunk_size=2, 
-            max_workers=2, 
-            quote=None, 
-            exchange=None, 
-            include_after_hours=True,
-            sleep_time=0.1
-            ):
+        self,
+        assets,
+        length,
+        timestep="minute",
+        timeshift=None,
+        chunk_size=2,
+        max_workers=2,
+        quote=None,
+        exchange=None,
+        include_after_hours=True,
+        sleep_time=0.1,
+    ):
         """Override: return Bars directly only for continuous futures (CONT_FUTURE) single asset; else parent dict.
         This satisfies unit tests expecting Bars for continuous futures while keeping alias test expecting dict."""
         from lumibot.entities import Asset as LBAsset
+
         if not isinstance(assets, list):
             asset = assets
             try:
-                if getattr(asset, 'asset_type', None) == LBAsset.AssetType.CONT_FUTURE:
+                if getattr(asset, "asset_type", None) == LBAsset.AssetType.CONT_FUTURE:
                     return self._fetch_bars(asset=asset, length=length, timestep=timestep, timeshift=timeshift or 0)
             except Exception:
                 pass
-        return super().get_bars(assets, length, timestep=timestep, timeshift=timeshift, chunk_size=chunk_size, max_workers=max_workers, quote=quote, exchange=exchange, include_after_hours=include_after_hours, sleep_time=sleep_time)
+        return super().get_bars(
+            assets,
+            length,
+            timestep=timestep,
+            timeshift=timeshift,
+            chunk_size=chunk_size,
+            max_workers=max_workers,
+            quote=quote,
+            exchange=exchange,
+            include_after_hours=include_after_hours,
+            sleep_time=sleep_time,
+        )
 
     # Internal single-asset fetcher to align with base class multi-asset logic
     def _fetch_bars(self, asset: Asset, length: int, timestep: str = "minute", timeshift: int = None) -> Bars | None:
@@ -264,7 +278,7 @@ class ProjectXData(DataSource):
             # Enhanced datetime normalization & logging
             # Debug & normalize datetime columns
             try:
-                dt_cols = [c for c in df.columns if any(k in c.lower() for k in ["date", "time", "dt"]) ]
+                dt_cols = [c for c in df.columns if any(k in c.lower() for k in ["date", "time", "dt"])]
                 # Synthesize a single datetime column if one not already present
                 has_datetime = any(c.lower() in ("datetime", "date_time") for c in df.columns)
                 if not has_datetime:
@@ -279,10 +293,13 @@ class ProjectXData(DataSource):
                             df = df[df["datetime"].notna()]
                             after = len(df)
                             if before != after:
-                                self.logger.debug(f"Dropped {before-after} rows with invalid datetime parse for {asset.symbol}")
+                                self.logger.debug(
+                                    f"Dropped {before-after} rows with invalid datetime parse for {asset.symbol}"
+                                )
                         except Exception as e_inner:
                             self.logger.debug(f"Failed to synthesize datetime column for {asset.symbol}: {e_inner}")
-                # Standardize index: if we now have a datetime column and the current index is RangeIndex / non-datetime, set it.
+                # Standardize index: if we have a datetime column and the
+                # current index is RangeIndex / non-datetime, set it.
                 try:
                     if "datetime" in df.columns:
                         if not isinstance(df.index, pd.DatetimeIndex) or df.index.name != "datetime":
@@ -291,21 +308,26 @@ class ProjectXData(DataSource):
                             valid_mask = dt_series.notna()
                             if not valid_mask.all():
                                 dropped = (~valid_mask).sum()
-                                self.logger.debug(f"Dropping {dropped} rows with invalid datetime during index set for {asset.symbol}")
+                                self.logger.debug(
+                                    f"Dropping {dropped} rows with invalid datetime during index set for {asset.symbol}"
+                                )
                                 df = df.loc[valid_mask]
                             df = df.set_index("datetime")
 
-                            # Convert to local timezone similar to other sources (Bars keeps tz-aware). Use UTC to be consistent.
+                            # Convert to local timezone similar to other sources
+                            # (Bars keeps tz-aware). Use UTC to be consistent.
                             if df.index.tz is None:
-                                df.index = df.index.tz_localize('UTC')
+                                df.index = df.index.tz_localize("UTC")
                             else:
                                 # Ensure UTC for internal consistency; strategies can localize later.
-                                df.index = df.index.tz_convert('UTC')
+                                df.index = df.index.tz_convert("UTC")
                 except Exception as idx_exc:
                     self.logger.debug(f"Failed to standardize datetime index for {asset.symbol}: {idx_exc}")
                 sample_head = df.head(3)[dt_cols].to_dict(orient="list") if dt_cols else {}
                 debug_msg = (
-                    f"Retrieved {len(df)} bars for {asset.symbol}; datetime-related cols={dt_cols}; has_datetime={'datetime' in df.columns}; sample={sample_head}"
+                    f"Retrieved {len(df)} bars for {asset.symbol}; "
+                    f"datetime-related cols={dt_cols}; "
+                    f"has_datetime={'datetime' in df.columns}; sample={sample_head}"
                 )
                 self.logger.debug(debug_msg)
                 # Also emit on module logger for tests capturing module-level logs
@@ -326,8 +348,16 @@ class ProjectXData(DataSource):
         """
         return 0.0
 
-    def get_historical_prices(self, asset: Asset, length: int, timestep: str = "minute",
-                             timeshift=None, quote=None, exchange=None, include_after_hours=True) -> Bars:
+    def get_historical_prices(
+        self,
+        asset: Asset,
+        length: int,
+        timestep: str = "minute",
+        timeshift=None,
+        quote=None,
+        exchange=None,
+        include_after_hours=True,
+    ) -> Bars:
         """
         Get historical prices for an asset.
 
@@ -363,6 +393,18 @@ class ProjectXData(DataSource):
 
     # ========== Helper Methods ==========
 
+    # TopStepX contract override: some symbols need to use specific contracts
+    # instead of the standard front month because TopStepX pre-rolls to next contract
+    # earlier than CME's standard roll schedule.
+    # Example: As of Nov 2025, TopStepX offers MGC.G26 (Feb 2026) while CME front
+    # month is still Z25 (Dec 2025), causing a ~$40 price mismatch if using Z25
+    # Format: ProjectX contract ID format (CON.F.US.{symbol}.{month}{year})
+    # TODO: Make this configurable via env var or config file for easier updates
+    TOPSTEPX_CONTRACT_OVERRIDE = {
+        "MGC": "CON.F.US.MGC.G26",  # Use G26 (Feb 2026) instead of Z25 (Dec 2025)
+        "GC": "CON.F.US.GCE.G26",  # Same for full-size gold futures (GCE is ProjectX symbol)
+    }
+
     def _get_contract_id_from_asset(self, asset: Asset) -> str:
         """Get ProjectX contract ID from Lumibot asset."""
         # Check cache first
@@ -372,6 +414,16 @@ class ProjectXData(DataSource):
 
         try:
             contract_id = None
+            symbol = asset.symbol.upper()
+
+            # Check for TopStepX contract override FIRST
+            # This handles cases where TopStepX offers a different contract month
+            # than the CME front month (e.g., G26 instead of Z25 for MGC)
+            if symbol in self.TOPSTEPX_CONTRACT_OVERRIDE:
+                override_contract = self.TOPSTEPX_CONTRACT_OVERRIDE[symbol]
+                self.logger.info(f"Using TopStepX contract override: {symbol} -> {override_contract}")
+                self._contract_cache[cache_key] = override_contract
+                return override_contract
 
             # Handle continuous futures using Asset class logic
             if asset.asset_type == Asset.AssetType.CONT_FUTURE:
@@ -387,7 +439,7 @@ class ProjectXData(DataSource):
                             # Parse symbol like "MESU25" -> "CON.F.US.MES.U25"
                             if len(contract_symbol) >= 4:
                                 base_symbol = contract_symbol[:-3]  # Remove last 3 chars
-                                month_year = contract_symbol[-3:]   # Get month + year code
+                                month_year = contract_symbol[-3:]  # Get month + year code
                                 if len(month_year) == 3:
                                     month_code = month_year[0]
                                     year_code = month_year[1:]
@@ -443,7 +495,8 @@ class ProjectXData(DataSource):
 
             # Parse compound timespans like "1minute", "5minute", "1hour", etc.
             import re
-            match = re.match(r'(\d+)(\w+)', timespan)
+
+            match = re.match(r"(\d+)(\w+)", timespan)
 
             if match:
                 unit_number = int(match.group(1))
@@ -530,8 +583,9 @@ class ProjectXData(DataSource):
             self.logger.error(f"Error searching contracts for '{search_text}': {e}")
             return []
 
-    def get_bars_from_datetime(self, asset: Asset, start_datetime: datetime,
-                              end_datetime: datetime, timespan: str = "minute") -> Bars:
+    def get_bars_from_datetime(
+        self, asset: Asset, start_datetime: datetime, end_datetime: datetime, timespan: str = "minute"
+    ) -> Bars:
         """
         Get historical bars between specific datetime range.
 
@@ -567,7 +621,7 @@ class ProjectXData(DataSource):
                 limit=10000,  # Large limit to get all data in range
                 include_partial_bar=True,
                 live=False,
-                is_est=True
+                is_est=True,
             )
 
             if df.empty:
@@ -575,12 +629,7 @@ class ProjectXData(DataSource):
                 return None
 
             # Create Bars object
-            bars = Bars(
-                df=df,
-                source=self.SOURCE,
-                asset=asset,
-                raw=df.to_dict()
-            )
+            bars = Bars(df=df, source=self.SOURCE, asset=asset, raw=df.to_dict())
 
             self.logger.debug(f"Retrieved {len(df)} bars for {asset.symbol} from {start_datetime} to {end_datetime}")
             return bars
