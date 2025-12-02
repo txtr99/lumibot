@@ -126,6 +126,11 @@ class BracketOrderManager:
         self._repair_cooldown: Dict[str, datetime] = {}
         self.REPAIR_COOLDOWN_MINUTES = 15  # Wait 15 minutes after market-closed failure
 
+        # Fill retry tracking: order_id -> retry count
+        # Prevents infinite loop when trade_search doesn't return matching trades
+        self._fill_retry_counts: Dict[int, int] = {}
+        self.MAX_FILL_RETRIES = 10  # ~20 seconds at 2s poll interval
+
         # Dedicated position sync log file
         self._setup_sync_logger()
 
@@ -901,12 +906,25 @@ class BracketOrderManager:
             # Get ACTUAL fill price from trades
             fill_price = trade_prices.get(order_id)
             if fill_price is None:
-                self.logger.debug(
-                    f"[BRACKET-REASONING] I know fill {order_id} exists (tag={tag}) but I don't have the "
-                    f"price yet from trade_search. I'll wait and try again next poll - don't want to "
-                    f"update positions with a guessed price."
-                )
-                continue  # DO NOT add to _processed_fills - retry next cycle
+                # Track retries to prevent infinite loop
+                retry_count = self._fill_retry_counts.get(order_id, 0) + 1
+                self._fill_retry_counts[order_id] = retry_count
+
+                if retry_count < self.MAX_FILL_RETRIES:
+                    self.logger.debug(
+                        f"[BRACKET-REASONING] Fill {order_id} (tag={tag}) has no trade price yet. "
+                        f"Retry {retry_count}/{self.MAX_FILL_RETRIES}."
+                    )
+                    continue  # Retry next cycle
+                else:
+                    # Give up - mark as processed to prevent infinite loop
+                    self.logger.warning(
+                        f"[BRACKET-REASONING] Fill {order_id} (tag={tag}) never got a trade price after "
+                        f"{self.MAX_FILL_RETRIES} attempts. Marking as processed to prevent loop."
+                    )
+                    self._processed_fills.add(order_id)
+                    self._fill_retry_counts.pop(order_id, None)  # Clean up retry counter
+                    continue
 
             # SANITY CHECK: Validate fill price is reasonable
             # If executor estimated a price, the actual fill should be close (within 1% for futures)
@@ -1047,6 +1065,7 @@ class BracketOrderManager:
                         )
 
                 self._processed_fills.add(order_id)
+                self._fill_retry_counts.pop(order_id, None)  # Clean up retry counter on success
 
             except Exception as e:
                 self.logger.error(f"[BRACKET] Error processing fill {order_id}: {e}")

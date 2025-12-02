@@ -96,6 +96,12 @@ class EnhancedStrategyState(StrategyState):
         self.total_fees_paid: float = 0.0
         self.fees_since_entry: float = 0.0
 
+        # Exit type counters (since bot start)
+        self.sl_count: int = 0  # Stop-loss exits
+        self.tp_count: int = 0  # Take-profit exits
+        self.time_exit_count: int = 0  # Time-based exits
+        self.force_close_count: int = 0  # Calendar-forced exits
+
         # Contract ID for ProjectX API (e.g., "CON.F.US.EP.Z25")
         # Set during strategy loading from futures_metadata
         self.contract_id: str = ""
@@ -841,12 +847,9 @@ class MultiStrategyExecutorEnhanced:
                     close_order = self._create_close_order(strategy_state, virtual_qty)
                     if close_order:
                         orders_to_submit.append((strategy_state, close_order, True, "time_exit", None))
-                        # Clear entry tracking after time exit
-                        strategy_state.entry_time = None
-                        strategy_state.entry_price = None
-                        strategy_state.bars_in_trade = 0
-                        strategy_state.take_profit_price = None
-                        strategy_state.stop_loss_price = None
+                        # NOTE: Don't clear entry_price here! It's needed for P&L calculation
+                        # when the order is processed. Entry tracking is cleared in
+                        # _execute_all_orders after P&L is calculated (lines 1466-1474).
                     continue
 
                 # 2d. Check calendar/timing (only if calendar is available)
@@ -1448,6 +1451,15 @@ class MultiStrategyExecutorEnhanced:
                                 }
                             )
                             strategy_state.trade_count += 1
+                            # Increment exit type counter
+                            if reason == "bracket_sl":
+                                strategy_state.sl_count += 1
+                            elif reason == "bracket_tp":
+                                strategy_state.tp_count += 1
+                            elif reason == "time_exit":
+                                strategy_state.time_exit_count += 1
+                            elif reason == "force_close":
+                                strategy_state.force_close_count += 1
                             # Reset entry tracking after a close/reversal
                             strategy_state.entry_time = None
                             strategy_state.entry_price = None
@@ -1782,6 +1794,15 @@ class MultiStrategyExecutorEnhanced:
                 "held": time_held,
                 "bars": f"{bars_in}/{max_bars_str}",
                 "signal": last_signal[:4] if last_signal != "-" else "-",
+                "#tr": str(state.trade_count) if state.trade_count > 0 else "-",
+                "rPnL": (
+                    f"{BOLD_GREEN}${state.realized_pnl:+.0f}{RESET}"
+                    if state.realized_pnl > 0
+                    else (f"{RED}${state.realized_pnl:+.0f}{RESET}" if state.realized_pnl < 0 else "-")
+                ),
+                "exits": (
+                    f"{state.sl_count}/{state.tp_count}/{state.time_exit_count}" if state.trade_count > 0 else "-"
+                ),
                 "tWin": t_win,
                 "tFlat": t_flat,
                 "data": data_col,
@@ -1814,6 +1835,9 @@ class MultiStrategyExecutorEnhanced:
             "held",
             "bars",
             "signal",
+            "#tr",
+            "rPnL",
+            "exits",
             "tWin",
             "tFlat",
             "data",
