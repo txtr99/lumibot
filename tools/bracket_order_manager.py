@@ -911,20 +911,42 @@ class BracketOrderManager:
                 self._fill_retry_counts[order_id] = retry_count
 
                 if retry_count < self.MAX_FILL_RETRIES:
-                    self.logger.debug(
-                        f"[BRACKET-REASONING] Fill {order_id} (tag={tag}) has no trade price yet. "
-                        f"Retry {retry_count}/{self.MAX_FILL_RETRIES}."
-                    )
+                    # Log at INFO for first few retries to help diagnose
+                    if retry_count <= 3:
+                        self.logger.info(
+                            f"[BRACKET-WAIT] Fill {order_id} (tag={tag}) has no trade price yet. "
+                            f"Retry {retry_count}/{self.MAX_FILL_RETRIES}. "
+                            f"Available trade orderIds: {list(trade_prices.keys())[:5]}"
+                        )
                     continue  # Retry next cycle
                 else:
-                    # Give up - mark as processed to prevent infinite loop
-                    self.logger.warning(
-                        f"[BRACKET-REASONING] Fill {order_id} (tag={tag}) never got a trade price after "
-                        f"{self.MAX_FILL_RETRIES} attempts. Marking as processed to prevent loop."
-                    )
-                    self._processed_fills.add(order_id)
+                    # Give up - use order's price as fallback for exit fills
                     self._fill_retry_counts.pop(order_id, None)  # Clean up retry counter
-                    continue
+
+                    # Get correct price field based on order type
+                    if "TP" in tag:
+                        fallback_price = order.get("price")  # Limit order price
+                    elif "SL" in tag or "STOP" in tag:
+                        fallback_price = order.get("stopPrice") or order.get("price")  # Stop price
+                    else:
+                        fallback_price = order.get("price")  # Market order fill price
+
+                    if fallback_price and tag.startswith(
+                        ("BRK_TP_", "BRK_STOP_", "BRK_CLOSE_", "TP_", "SL_", "CLOSE_")
+                    ):
+                        self.logger.warning(
+                            f"[BRACKET-GIVEUP] Fill {order_id} (tag={tag}) using order price "
+                            f"({fallback_price}) after {self.MAX_FILL_RETRIES} attempts."
+                        )
+                        fill_price = fallback_price  # Use order's price as fallback
+                        # Don't continue - let processing proceed with fallback price
+                    else:
+                        self.logger.warning(
+                            f"[BRACKET-GIVEUP] Fill {order_id} (tag={tag}) has no usable price after "
+                            f"{self.MAX_FILL_RETRIES} attempts. Marking as processed without P&L."
+                        )
+                        self._processed_fills.add(order_id)
+                        continue
 
             # SANITY CHECK: Validate fill price is reasonable
             # If executor estimated a price, the actual fill should be close (within 1% for futures)
@@ -994,6 +1016,19 @@ class BracketOrderManager:
                             direction = 1 if pos.quantity > 0 else -1  # Long = +1, Short = -1
                             trade_pnl = (fill_price - entry_price) * exit_qty * multiplier * direction
 
+                            # Record P&L with ACTUAL fill prices (more accurate than executor's bar close)
+                            state.realized_pnl += trade_pnl
+                            state.trade_count += 1
+                            if "TP" in tag:
+                                state.tp_count += 1
+                            elif "SL" in tag or "STOP" in tag:
+                                state.sl_count += 1
+                            state.exit_handled_by_bracket = True
+                            self.logger.info(
+                                f"[BOM-PNL] Recorded P&L for {strategy_id}: ${trade_pnl:+.2f} "
+                                f"(entry={entry_price:.2f}, exit={fill_price:.2f}, actual broker fills)"
+                            )
+
                         self.logger.info(
                             f"[BRACKET-REASONING] Exit fill for {strategy_id}! A {exit_type} order just filled. "
                             f"I'm closing {exit_qty} contracts at {fill_price}. "
@@ -1009,6 +1044,7 @@ class BracketOrderManager:
                             state.entry_price = None
                             state.take_profit_price = None
                             state.stop_loss_price = None
+                            state.brackets_submitted = False  # Allow next trade cycle
                             # Clear failure counters when flat
                             self._failed_recreations.pop(f"BRK_TP_{strategy_id}", None)
                             self._failed_recreations.pop(f"BRK_STOP_{strategy_id}", None)

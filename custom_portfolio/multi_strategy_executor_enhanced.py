@@ -102,6 +102,10 @@ class EnhancedStrategyState(StrategyState):
         self.time_exit_count: int = 0  # Time-based exits
         self.force_close_count: int = 0  # Calendar-forced exits
 
+        # Coordination flag: Set by BracketOrderManager when it handles TP/SL exit
+        # Prevents executor from double-counting P&L with less accurate bar prices
+        self.exit_handled_by_bracket: bool = False
+
         # Contract ID for ProjectX API (e.g., "CON.F.US.EP.Z25")
         # Set during strategy loading from futures_metadata
         self.contract_id: str = ""
@@ -562,6 +566,12 @@ class MultiStrategyExecutorEnhanced:
         Returns:
             (hit, price, reason)
         """
+        # If BracketOrderManager already handled this exit with actual fill prices,
+        # skip bar-based detection to avoid double-counting P&L
+        if strategy_state.exit_handled_by_bracket:
+            strategy_state.exit_handled_by_bracket = False  # Clear for next trade
+            return False, None, None
+
         if market_data is None or len(market_data) == 0:
             return False, None, None
 
@@ -577,6 +587,40 @@ class MultiStrategyExecutorEnhanced:
         sl = strategy_state.stop_loss_price
         qty = pos.quantity
 
+        # In live mode with real broker brackets, let BOM handle fills via trade_search.
+        # But add fallback: if brackets were submitted long ago and price clearly crossed,
+        # the bracket orders may have failed/cancelled - force close as safety net.
+        if strategy_state.brackets_submitted:
+            brackets_age = time.time() - getattr(strategy_state, "brackets_submitted_at", 0)
+            FALLBACK_SECONDS = 60  # After 60s, if price crossed TP/SL, assume brackets failed
+
+            if brackets_age < FALLBACK_SECONDS:
+                # Still within grace period - trust BOM to handle fills
+                return False, None, None
+
+            # Fallback check: price clearly crossed TP/SL but no fill received
+            price_crossed_sl = False
+            price_crossed_tp = False
+            if qty > 0:
+                price_crossed_sl = sl is not None and low is not None and low <= sl
+                price_crossed_tp = tp is not None and high is not None and high >= tp
+            elif qty < 0:
+                price_crossed_sl = sl is not None and high is not None and high >= sl
+                price_crossed_tp = tp is not None and low is not None and low <= tp
+
+            if price_crossed_sl or price_crossed_tp:
+                reason = "bracket_sl" if price_crossed_sl else "bracket_tp"
+                price = sl if price_crossed_sl else tp
+                self.logger.warning(
+                    f"[BRACKET-FALLBACK] {strategy_state.strategy_id}: Brackets submitted {brackets_age:.0f}s ago "
+                    f"but price crossed {reason.upper()} with no fill. Forcing close as safety net."
+                )
+                return True, float(price), reason
+
+            # Price hasn't crossed yet - keep waiting for BOM
+            return False, None, None
+
+        # Backtest mode or no brackets submitted - use bar-based detection
         if qty > 0:
             if sl is not None and low is not None and low <= sl:
                 return True, float(sl), "bracket_sl"
@@ -1418,49 +1462,60 @@ class MultiStrategyExecutorEnhanced:
 
                         # Reversal or flattening: close prior position if we had one
                         if qty_before != 0 and (qty_after == 0 or qty_before * qty_after < 0):
-                            entry_price = (
-                                strategy_state.entry_price if strategy_state.entry_price is not None else current_price
-                            )
-                            multiplier = get_multiplier(strategy_state.symbol)
-                            realized = (current_price - entry_price) * qty_before * multiplier
-                            net_realized = realized - strategy_state.fees_since_entry
-                            strategy_state.realized_pnl += net_realized
-                            self.logger.info(
-                                f"[EXECUTOR-REASONING] {strategy_state.strategy_id}: Trade complete! "
-                                f"I entered at {entry_price}, exited at {current_price} with {qty_before} contracts. "
-                                f"Net P&L after fees: ${net_realized:.2f}. Resetting entry tracking for next trade."
-                            )
-                            self.attribution.record_trade(
-                                strategy_state.strategy_id,
-                                entry_price,
-                                current_price,
-                                qty_before,
-                                timestamp=bar_time,
-                                fees=strategy_state.fees_since_entry,
-                                symbol=strategy_state.symbol,
-                                multiplier=multiplier,
-                            )
-                            strategy_state.trade_history.append(
-                                {
-                                    "timestamp": bar_time,
-                                    "entry_price": entry_price,
-                                    "exit_price": current_price,
-                                    "quantity": qty_before,
-                                    "pnl": net_realized,
-                                    "fees": strategy_state.fees_since_entry,
-                                }
-                            )
-                            strategy_state.trade_count += 1
-                            # Increment exit type counter
-                            if reason == "bracket_sl":
-                                strategy_state.sl_count += 1
-                            elif reason == "bracket_tp":
-                                strategy_state.tp_count += 1
-                            elif reason == "time_exit":
-                                strategy_state.time_exit_count += 1
-                            elif reason == "force_close":
-                                strategy_state.force_close_count += 1
-                            # Reset entry tracking after a close/reversal
+                            # Check if BracketOrderManager already handled P&L with actual fill prices
+                            if not strategy_state.exit_handled_by_bracket:
+                                # Record P&L using bar close (only path for time/force exits)
+                                entry_price = (
+                                    strategy_state.entry_price
+                                    if strategy_state.entry_price is not None
+                                    else current_price
+                                )
+                                multiplier = get_multiplier(strategy_state.symbol)
+                                realized = (current_price - entry_price) * qty_before * multiplier
+                                net_realized = realized - strategy_state.fees_since_entry
+                                strategy_state.realized_pnl += net_realized
+                                self.logger.info(
+                                    f"[EXECUTOR-REASONING] {strategy_state.strategy_id}: Trade complete! "
+                                    f"Entry={entry_price}, exit={current_price}, qty={qty_before}. "
+                                    f"Net P&L: ${net_realized:.2f}. Resetting entry tracking."
+                                )
+                                self.attribution.record_trade(
+                                    strategy_state.strategy_id,
+                                    entry_price,
+                                    current_price,
+                                    qty_before,
+                                    timestamp=bar_time,
+                                    fees=strategy_state.fees_since_entry,
+                                    symbol=strategy_state.symbol,
+                                    multiplier=multiplier,
+                                )
+                                strategy_state.trade_history.append(
+                                    {
+                                        "timestamp": bar_time,
+                                        "entry_price": entry_price,
+                                        "exit_price": current_price,
+                                        "quantity": qty_before,
+                                        "pnl": net_realized,
+                                        "fees": strategy_state.fees_since_entry,
+                                    }
+                                )
+                                strategy_state.trade_count += 1
+                                # Increment exit type counter
+                                if reason == "bracket_sl":
+                                    strategy_state.sl_count += 1
+                                elif reason == "bracket_tp":
+                                    strategy_state.tp_count += 1
+                                elif reason == "time_exit":
+                                    strategy_state.time_exit_count += 1
+                                elif reason == "force_close":
+                                    strategy_state.force_close_count += 1
+                            else:
+                                # BOM already recorded P&L with actual fills - skip to avoid double-counting
+                                self.logger.info(
+                                    f"[EXECUTOR-REASONING] {strategy_state.strategy_id}: Exit handled by "
+                                    f"BracketOrderManager with actual fill prices. Skipping bar-based P&L."
+                                )
+                            # Reset entry tracking after a close/reversal (always do this)
                             strategy_state.entry_time = None
                             strategy_state.entry_price = None
                             strategy_state.entry_iteration = None
