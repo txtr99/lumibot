@@ -1,0 +1,20 @@
+inputs: 
+	Price( numericseries ), 
+	FastLength( numericsimple ), 
+	SlowLength( numericsimple ),
+	Smooth( numericsimple ),
+	Line( numericsimple ) ;
+
+Switch (Line)
+Begin
+	case 0: begin // MACD Main
+		SQ_MACD = MACD(Price, FastLength, SlowLength);
+		end;
+	
+	case 1: begin // MACD Signal
+		SQ_MACD = Average(MACD(Price, FastLength, SlowLength), Smooth);
+		end;
+End;
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value3 = SQ_MACD[1];

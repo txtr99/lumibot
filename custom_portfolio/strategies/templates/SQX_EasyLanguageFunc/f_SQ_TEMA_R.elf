@@ -1,0 +1,9 @@
+inputs: 
+	Price( numericseries ),
+	Period( numericsimple ), 
+	ApplyRound(NumericSimple);
+
+Value1 = SQ_TEMA(Price, Period);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_TEMA_R = Value1;
+

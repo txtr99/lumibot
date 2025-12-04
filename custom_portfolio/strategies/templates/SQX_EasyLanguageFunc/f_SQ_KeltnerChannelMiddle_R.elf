@@ -1,0 +1,6 @@
+inputs: Length( numericsimple ), NumATRs( numericsimple ), ApplyRound(NumericSimple) ;
+
+Value1 = SQ_KeltnerChannelMiddle(Length, NumATRs);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_KeltnerChannelMiddle_R = Value1;
+

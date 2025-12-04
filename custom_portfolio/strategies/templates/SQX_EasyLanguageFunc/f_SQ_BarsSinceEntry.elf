@@ -1,0 +1,4 @@
+inputs:
+	PosBack( numericsimple );
+
+SQ_BarsSinceEntry = BarsSinceEntry(PosBack);

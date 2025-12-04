@@ -1,0 +1,4 @@
+inputs: 
+	Period( numericsimple );
+	
+If Close[Period] > 0 Then SQ_ROC = (Close[0] - Close[Period]) / Close[Period] * 100 Else SQ_ROC = 0;

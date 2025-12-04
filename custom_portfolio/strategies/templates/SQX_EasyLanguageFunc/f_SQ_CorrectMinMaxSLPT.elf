@@ -1,0 +1,34 @@
+
+inputs:
+ SLPT(NumericSimple), MinimumSLPT(NumericSimple), MaximumSLPT(NumericSimple), IsSL(TrueFalseSimple);
+vars:
+ Coef(0), NewSLPT(0), MinPrice(0), MaxPrice(0), tickSize(MinMove/PriceScale);
+
+NewSLPT = SLPT;
+
+if((MarketPosition > 0 and IsSL = false) or (MarketPosition < 0 and IsSL = true)) then begin
+ Coef = 1;
+end Else begin
+ Coef = -1;
+end;
+
+    
+if(MinimumSLPT > 0) then begin
+ MinPrice = EntryPrice + (Coef * MinimumSLPT * tickSize);
+ if(Coef > 0) then begin
+  NewSLPT =  MaxList(minPrice, NewSLPT);
+ end else begin
+  NewSLPT = MinList(minPrice, NewSLPT);
+ end;
+end;
+
+if(MaximumSLPT > 0) then begin
+ MaxPrice = EntryPrice + (coef * MaximumSLPT * tickSize);
+ if(Coef > 0) then begin
+  NewSLPT = MinList(maxPrice, NewSLPT);
+ End else begin
+  NewSLPT = MaxList(maxPrice, NewSLPT);
+ end;
+end;
+
+SQ_CorrectMinMaxSLPT = NewSLPT;

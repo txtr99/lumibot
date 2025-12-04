@@ -1,0 +1,44 @@
+inputs:
+    int TimeToLookFor( numericsimple ), 
+    int StartingBar( numericsimple ),
+    int IsClosingBar( numericsimple );
+vars:
+	PreviousBarsTime( 0 ),
+	CurrentBarsTime( 0 ),
+	NextBarsTime( 0 ),
+	PreviousBarDate( 0 ),
+	CurrentBarDate( 0 ),
+	NextBarDate( 0 );
+	
+If StartingBar < 1 Then SQ_checkPivotsBarTime = 0
+Else begin
+	PreviousBarsTime = SQ_getIntTime(Time[StartingBar - 1]);
+	CurrentBarsTime = SQ_getIntTime(Time[StartingBar]);
+	NextBarsTime = SQ_getIntTime(Time[StartingBar + 1]);
+	
+	PreviousBarDate = StrToNum(Formatdate("yyyyMMdd", ElDateToDateTime(Date[StartingBar - 1])));
+	CurrentBarDate = StrToNum(Formatdate("yyyyMMdd", ElDateToDateTime(Date[StartingBar])));
+	NextBarDate = StrToNum(Formatdate("yyyyMMdd", ElDateToDateTime(Date[StartingBar + 1])));
+
+	If CurrentBarsTime = TimeToLookFor then SQ_checkPivotsBarTime = 1
+	Else begin 
+		If NextBarDate <> CurrentBarDate then NextBarsTime -= 1440;
+
+		If PreviousBarDate <> CurrentBarDate then begin 
+			If PreviousBarsTime > TimeToLookFor and CurrentBarsTime > TimeToLookFor Then SQ_checkPivotsBarTime = 1 Else begin 
+				PreviousBarsTime += 1440;
+
+				If PreviousBarsTime > TimeToLookFor and NextBarsTime < TimeToLookFor then begin
+					If IsClosingBar = 0 or CurrentBarsTime < TimeToLookFor Then SQ_checkPivotsBarTime = 1 Else SQ_checkPivotsBarTime = 0;
+				end
+				Else SQ_checkPivotsBarTime = 0;
+			end;
+		end
+		Else begin
+			If PreviousBarsTime > TimeToLookFor and NextBarsTime < TimeToLookFor then begin
+				If IsClosingBar = 0 or CurrentBarsTime < TimeToLookFor Then SQ_checkPivotsBarTime = 1 Else SQ_checkPivotsBarTime = 0;
+			end
+			Else SQ_checkPivotsBarTime = 0;
+		end;
+	end;
+end;

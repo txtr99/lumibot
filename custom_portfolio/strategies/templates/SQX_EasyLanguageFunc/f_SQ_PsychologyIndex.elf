@@ -1,0 +1,19 @@
+inputs: 
+	Period( numericsimple );
+
+variables:
+	double index( 0 ),
+	double UpDay( 0 ),
+	double sum( 0 );
+    
+sum = 0;
+
+For index=0 To Period - 1 Begin
+	If Close[index] > Close[index + 1] Then UpDay = 1 Else UpDay = 0;
+	sum += UpDay;
+End;
+
+SQ_PsychologyIndex = sum / Period * 100;
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_PsychologyIndex[1];

@@ -1,0 +1,51 @@
+inputs: 
+	Tenkan_Sen_Length( numericsimple ), 
+	Kinjun_Sen_Length( numericsimple ), 
+	Senkou_Span_B_Length( numericsimple ), 
+	Line( numericsimple ) ;
+
+variables: 
+	Tenkan_Sen(0), 
+	Kinjun_Sen(0), 
+	Senkou_Span_A(0), 
+	Senkou_Span_B(0);	
+
+Tenkan_Sen = ( SQ_Highest( High, Tenkan_Sen_Length ) + SQ_Lowest( Low, Tenkan_Sen_Length ) ) / 2 ;
+
+Kinjun_Sen = ( SQ_Highest( High, Kinjun_Sen_Length ) + SQ_Lowest( Low, Kinjun_Sen_Length ) ) / 2 ;
+ 
+If Currentbar >= Senkou_Span_B_Length and Currentbar >= Kinjun_Sen_Length then
+	begin
+	Senkou_Span_A = ( SQ_Highest( High[Kinjun_Sen_Length], Tenkan_Sen_Length ) + SQ_Lowest( Low[Kinjun_Sen_Length], Tenkan_Sen_Length ) ) / 2;
+	Senkou_Span_A += ( SQ_Highest( High[Kinjun_Sen_Length], Kinjun_Sen_Length ) + SQ_Lowest( Low[Kinjun_Sen_Length], Kinjun_Sen_Length ) ) / 2;
+	Senkou_Span_A = Senkou_Span_A / 2;
+	
+	Senkou_Span_B = ( SQ_Highest( High[Kinjun_Sen_Length] , Senkou_Span_B_Length ) + SQ_Lowest( Low[Kinjun_Sen_Length], Senkou_Span_B_Length ) ) / 2;
+	end
+Else 
+	begin
+	Senkou_Span_A = MedianPrice; 
+	Senkou_Span_B = MedianPrice;
+	end;
+ 
+Switch (Line)
+Begin
+	case 0: begin // tenkan sen
+		SQ_Ichimoku = Tenkan_Sen;
+		end;
+		
+	case 1: begin // kinjun sen
+		SQ_Ichimoku = Kinjun_Sen;
+		end;
+	
+	case 2: begin // senkou span a
+		SQ_Ichimoku = Senkou_Span_A;
+		end;
+	
+	case 3: begin // senkou span b
+		SQ_Ichimoku = Senkou_Span_B;
+		end;
+End;
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_Ichimoku[1];

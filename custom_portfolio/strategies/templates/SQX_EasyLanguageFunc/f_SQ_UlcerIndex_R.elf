@@ -1,0 +1,8 @@
+inputs: 
+	UIMode(numericsimple), 
+	UIPeriod( numericsimple ), 
+	ApplyRound(NumericSimple) ; 
+
+Value1 = SQ_UlcerIndex(UIMode, UIPeriod);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_UlcerIndex_R = Value1;

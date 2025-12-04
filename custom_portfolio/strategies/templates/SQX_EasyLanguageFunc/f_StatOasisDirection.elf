@@ -1,0 +1,42 @@
+//StatOasis Market Direction modifiied by Clonex
+
+Input:{-------------------------------------------------------------------------------------}
+	Line( numericsimple );
+
+variables:{---------------------------------------------------------------------------------} 
+    // Market Regimes
+	StrongBull (1.45),
+	Bull (0.7),
+	Neutral (0.0),
+	Bear (-0.7),
+    // Other Vars
+	iLength (100),
+	DailyChange (0),
+	R100avg (0),
+	SD_R100avg (0),
+	MarketDTN (0);
+
+
+//===================== Calculations ========================================================
+	
+	DailyChange = iff(Close[1] <> 0, (Close[0] - Close[1]) / Close[1],1) ; // Daily % Change
+	R100avg = Average ( DailyChange , iLength ) ; // Average Daily % Change
+	SD_R100avg = StandardDev( DailyChange , iLength, 1 ) ; // Standard Deviation of Daily % Change
+	
+	MarketDTN = iff(SD_R100avg <> 0 , (R100avg / SD_R100avg) * 10 , 1) ; // to calculate market direction value
+	
+	if Line = 0 then 
+	Begin
+		StatOasisDirection = MarketDTN ; // 0 line of indi
+	end;
+	
+	If Line = 1 then // 1 line of indi
+	Begin
+			If MarketDTN >= StrongBull then StatOasisDirection = 5 ; // Strong Bull
+			If MarketDTN >= Bull AND MarketDTN < StrongBull then StatOasisDirection = 4 ; // Bull
+			If MarketDTN >= Neutral AND MarketDTN < Bull then StatOasisDirection = 3 ; // Neutral
+			If MarketDTN >= Bear AND MarketDTN < Neutral then StatOasisDirection = 2 ; // Bear
+			If MarketDTN < Bear then StatOasisDirection = 1 ; // Strong Bear		
+			
+	end;
+		

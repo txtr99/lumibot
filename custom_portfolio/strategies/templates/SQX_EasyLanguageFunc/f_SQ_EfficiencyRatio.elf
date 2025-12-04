@@ -1,0 +1,20 @@
+[LegacyColorValue = true]; 
+
+Inputs: Period(Numeric);
+Vars: Noise(0), Signal(0), Diff(0), efRatio(0);
+Diff = AbsValue(Close - Close[1]);
+IF CurrentBar <= Period Then SQ_EfficiencyRatio = 0;
+IF CurrentBar > Period Then Begin
+	Signal = AbsValue(Close - Close[Period]);
+	Noise = Summation(Diff, Period);
+	if Noise <> 0 then 
+		efRatio = Signal / Noise
+	Else begin 
+		efRatio = 0;
+	End;
+
+End;
+
+SQ_EfficiencyRatio = efRatio;
+
+{Copyright 1997 Technical Analysis, Inc.}									   

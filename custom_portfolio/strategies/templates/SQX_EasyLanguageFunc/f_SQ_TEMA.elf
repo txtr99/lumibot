@@ -1,0 +1,8 @@
+inputs: 
+	Price( numericseries ),
+	Period( numericsimple );
+	
+SQ_TEMA = (3 * XAVERAGE(Price,Period)) - (3 * XAVERAGE(XAVERAGE(Price,Period),Period)) + (XAVERAGE(XAVERAGE(XAVERAGE(Price,Period),Period),Period));
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_TEMA[1];

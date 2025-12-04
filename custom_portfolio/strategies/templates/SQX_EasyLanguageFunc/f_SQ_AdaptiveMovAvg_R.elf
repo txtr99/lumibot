@@ -1,0 +1,11 @@
+inputs: 
+	PriceSeries(NumericSeries), ERPrd( numericsimple ), ShrPrd( numericsimple), LngPrd( numericsimple), ApplyRound(NumericSimple);
+
+Variables: 
+	AdaptiveMA(0);
+	
+AdaptiveMA = SQ_AdaptiveMovAvg(PriceSeries, ERPrd, ShrPrd, LngPrd);
+If ApplyRound = 1 then AdaptiveMA = Round(AdaptiveMA, 6);
+
+SQ_AdaptiveMovAvg_R = AdaptiveMA;
+

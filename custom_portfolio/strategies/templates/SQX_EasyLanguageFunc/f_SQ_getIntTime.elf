@@ -1,0 +1,10 @@
+inputs:
+    int timeValue( numericsimple );
+vars:
+    hours( 0 ),
+    minutes( 0 );
+
+hours = IntPortion(timeValue / 100);
+minutes = mod(timeValue, 100);
+
+SQ_getIntTime = hours * 60 + minutes;

@@ -1,0 +1,13 @@
+inputs:
+	OpenPrice( numericsimple ), 
+	RiskedMoney( numericsimple ),
+	Decimals( numericsimple ),
+	InitialCapital( numericsimple ),
+	Multiplier( numericsimple );
+vars:
+  	double TradeSize( 0 );
+
+TradeSize = IntPortion(RiskedMoney / OpenPrice * Power(10, Decimals)) / Power(10, Decimals); //Round down to Decimals
+TradeSize = IntPortion(TradeSize * Multiplier);
+
+SQ_CryptoFixedAmount = TradeSize;

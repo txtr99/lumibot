@@ -1,0 +1,47 @@
+inputs:
+	KPeriod( numericsimple ),
+	DPeriod( numericsimple ),
+	Slowing( numericsimple ),
+	MAMethod( numericsimple ),
+	PriceField( numericsimple ),
+	k( numericref ),
+	oFastK( numericref ),
+	oSlowD( numericref );
+
+variables:
+	nom( 0 ),
+	den( 0 );
+	
+switch(PriceField) begin
+	Case 0:
+		nom = Close - SQ_Lowest(Low, KPeriod);
+		den = SQ_Highest(High, KPeriod) - SQ_Lowest(Low, KPeriod);
+	Case 1:
+		nom = Close - SQ_Lowest(Close, KPeriod);
+		den = SQ_Highest(Close, KPeriod) - SQ_Lowest(Close, KPeriod);
+end;
+
+If den < 0.00000001 and den > -0.00000001 then 
+	If Currentbar = 1 then k = 50 else k = k[1]
+Else 
+	k = MinList(100, Maxlist(0, 100 * nom / den));
+
+switch(MAMethod) begin
+	Case 0:
+		oFastK = SQ_SMA(k, Slowing);
+		oSlowD = SQ_SMA(oFastK, DPeriod);
+	Case 1:
+		oFastK = SQ_EMA(k, Slowing);
+		oSlowD = SQ_EMA(oFastK, DPeriod);
+	Case 2:
+		oFastK = SQ_SMMA(k, Slowing);
+		oSlowD = SQ_SMMA(oFastK, DPeriod);
+	Case 3:
+		oFastK = SQ_LWMA(k, Slowing);
+		oSlowD = SQ_LWMA(oFastK, DPeriod);
+	Default: 
+		oFastK = SQ_SMA(k, Slowing);
+		oSlowD = SQ_SMA(oFastK, DPeriod);
+end;
+
+SQ_StochasticFn = 1;

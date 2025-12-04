@@ -1,0 +1,13 @@
+inputs: 
+	Period( numericsimple );
+	
+Value1 = SQ_Highest(High, Period);
+Value2 = SQ_Lowest(Low, Period);
+Value3 = Value1 - Value2;
+
+If Value3 = 0 then Value3 = 1;
+
+SQ_WilliamsPR = -100 * (Value1 - Close[0]) / Value3;
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_WilliamsPR[1];

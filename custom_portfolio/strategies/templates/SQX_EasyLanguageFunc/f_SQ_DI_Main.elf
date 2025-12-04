@@ -1,0 +1,94 @@
+Inputs:
+    Period(NumericSimple),
+    Decimals(NumericSimple),
+    Hi(NumericSeries),
+    Lo(NumericSeries),
+    Cl(NumericSeries),
+    oDIPlus(NumericRef),
+    oDIMinus(NumericRef);
+
+Vars:
+    curHigh(0), curLow(0), trueRange(0),
+    lastHigh(0), lastLow(0), lastClose(0),
+    deltaHH(0), deltaLL(0), deltaHC(0), deltaLC(0),
+    tr(0), dmPlus(0), dmMinus(0),
+    curSumTr(0), curSumDmPlus(0), curSumDmMinus(0),
+    sumTr(0), sumDmPlus(0), sumDmMinus(0),
+    diff(0), sumVal(0),
+    Main(0);
+
+curHigh   = Hi;
+curLow    = Lo;
+trueRange = curHigh - curLow;
+
+If CurrentBar = 1 Then
+Begin
+    sumTr      = trueRange;
+    sumDmPlus  = 0;
+    sumDmMinus = 0;
+    Main       = 0;
+    oDIPlus    = 0;
+    oDIMinus   = 0;
+End
+Else
+Begin
+    lastHigh  = Hi[1];
+    lastLow   = Lo[1];
+    lastClose = Cl[1];
+
+    deltaHH = Round(curHigh - lastHigh,  Decimals);
+    deltaLL = Round(lastLow  - curLow,   Decimals);
+    deltaHC = Round(curHigh - lastClose, Decimals);
+    deltaLC = Round(curLow  - lastClose, Decimals);
+
+    tr = MaxList( AbsValue(deltaLC),
+                  MaxList( trueRange, AbsValue(deltaHC) ) );
+
+    If deltaHH > deltaLL then
+        dmPlus  = MaxList(deltaHH, 0)
+    Else
+        dmPlus  = 0;
+
+    If deltaLL > deltaHH then
+        dmMinus = MaxList(deltaLL, 0)
+    Else
+        dmMinus = 0;
+
+    If CurrentBar < Period Then
+    Begin
+        curSumTr      = Round(sumTr      + tr, Decimals);
+        curSumDmPlus  =        sumDmPlus + dmPlus;
+        curSumDmMinus =        sumDmMinus+ dmMinus;
+    End
+    Else
+    Begin
+        curSumTr      = Round(sumTr      - sumTr      / Period + tr, Decimals);
+        curSumDmPlus  =        sumDmPlus - sumDmPlus  / Period + dmPlus;
+        curSumDmMinus =        sumDmMinus- sumDmMinus / Period + dmMinus;
+    End;
+
+    sumTr      = curSumTr;
+    sumDmPlus  = curSumDmPlus;
+    sumDmMinus = curSumDmMinus;
+
+    If curSumTr = 0 Then
+    Begin
+        oDIPlus  = 0;
+        oDIMinus = 0;
+    End
+    Else
+    Begin
+        oDIPlus  = 100 * (curSumDmPlus  / curSumTr);
+        oDIMinus = 100 * (curSumDmMinus / curSumTr);
+    End;
+
+    diff   = AbsValue(oDIPlus - oDIMinus);
+    sumVal = Round(oDIPlus + oDIMinus, Decimals);
+
+    If sumVal = 0 Then
+        Main = 50
+    Else
+        Main = ((Period - 1) * Main[1] + 100 * diff / sumVal) / Period;
+End;
+
+SQ_DI_Main = Main;

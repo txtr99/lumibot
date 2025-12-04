@@ -1,0 +1,53 @@
+{
+TASC Feb 2020
+(C) 2019 John F. Ehlers
+_Reflex function
+}
+Inputs:
+	Length(numericsimple);
+Vars:
+	/// temp
+	bb1(0),
+	Slope( 0 ),
+	sum( 0 ),
+	count( 0 ),
+	a1( 0), b1(0), c1(0), 
+	c2(0), c3(0), Filt(0),
+	MS(0),Reflex(0);
+
+//Gently smooth the data in a SuperSmoother
+a1 = ExpValue( -1.414 * 3.14159 / 
+	( .5 * Length ) ) ;
+b1 = 2 * a1 * Cosine( 1.414 * 180 / 
+	( .5 * Length ) ) ;
+	
+//b1 = 2 * a1 * Cosine( 1.414 * 3.14159 / 
+	//( .5 * Length ) ) ;
+
+c2 = b1 ;
+c3 = -a1 * a1 ;
+c1 = 1 - c2 - c3 ;
+
+//Print(a1,b1);
+Filt = c1 * ( Close + Close[1] ) / 2 
+	+ c2 * Filt[1] + c3 * Filt[2] ;
+
+//Length is assumed cycle period
+Slope = ( Filt[Length] - Filt ) / Length ;
+
+//Sum the differences
+sum = 0;
+for count = 1 to Length 
+begin
+	sum = sum + ( Filt + count * Slope ) - 
+		Filt[count] ;
+end;
+sum = sum / Length ;
+
+//Normalize in terms of Standard Deviations
+MS = .04 * sum * sum + .96 * MS[1] ;
+if MS <> 0 then 
+	Reflex = sum / SquareRoot( MS ) ;
+
+
+SQ_Reflex = Reflex ;

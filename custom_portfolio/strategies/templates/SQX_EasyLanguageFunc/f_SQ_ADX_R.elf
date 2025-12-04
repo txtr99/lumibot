@@ -1,0 +1,7 @@
+inputs: 
+	Period( numericsimple ), Line( numericsimple ), ApplyRound(numericsimple);
+	
+Value1 = SQ_ADX(Period, Line);
+	
+If ApplyRound = 1 then Value1 = Round(Value1, 6);
+SQ_ADX_R = Value1;

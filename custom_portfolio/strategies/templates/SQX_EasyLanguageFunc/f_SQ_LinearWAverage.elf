@@ -1,0 +1,30 @@
+inputs: 
+	Price( numericseries ), 
+	Length( numericsimple ) ; { this input should be a constant >= 1 }
+
+vars:
+    max(0),
+	multiplier(Length),
+	divider(0),
+	sum(0),
+	index(0);
+
+if(Length < CurrentBar) then 
+    max = Length
+else 
+    max = CurrentBar;
+    
+divider = 0;
+sum = 0;
+multiplier = Length;
+    
+For index=0 To max Begin
+	divider += multiplier;
+	sum += Price[index] * (multiplier);
+	multiplier = multiplier - 1;
+End;
+
+SQ_LinearWAverage = sum / divider;	 
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_LinearWAverage[1];

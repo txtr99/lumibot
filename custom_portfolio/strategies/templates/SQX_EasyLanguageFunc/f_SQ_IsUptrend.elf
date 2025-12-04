@@ -1,0 +1,7 @@
+inputs: 
+	MethodType( NumericSimple );
+
+If Close[1] > SQ_SMA(Close, 200)[1] Then SQ_IsUptrend = 1 Else SQ_IsUptrend = 0;
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_IsUptrend[1];

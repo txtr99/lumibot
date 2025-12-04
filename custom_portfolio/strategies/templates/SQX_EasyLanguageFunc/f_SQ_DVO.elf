@@ -1,0 +1,29 @@
+inputs: 
+	MAPeriod(numericsimple),
+	PercentRankPeriod( numericsimple ) ;
+	
+
+vars:
+	index(0),
+	pRank(0),
+	sma(0),
+	percrank(0);
+    
+index = 1;
+percrank = 0;
+pRank =0;
+sma  =0;
+
+sma = Average(close/((high+low)/2),MAPeriod);    
+
+For index=1 To PercentRankPeriod Begin
+	if(Round(sma[0],6)>Round(sma[index],6)) then
+	pRank = pRank+1;
+		
+End;
+
+percrank = 100*pRank/PercentRankPeriod;
+SQ_DVO= 	percrank; 
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = percrank[1];

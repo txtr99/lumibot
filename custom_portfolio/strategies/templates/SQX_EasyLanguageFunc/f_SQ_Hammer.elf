@@ -1,0 +1,46 @@
+inputs:
+	tickSize( numericsimple );
+
+vars:
+	BodyHigh(0), BodyLow(0), 
+	LW(0), UW(0), BLa(0), BL90(0), 
+	LW_D2(0), LW_D3(0), LW_D4(0), BL90_M2(0), CL_MPV(0), 
+	Candle_Percent(0.9), CandleLength(12), CL(0);
+
+CL = High-Low;
+
+if (Open > Close) then begin
+	BodyHigh = Open;
+    BodyLow = Close;
+end else begin
+	BodyHigh = Close;
+	BodyLow = Open;
+end;
+
+LW = Round(BodyLow - Low, SQ_MarketDigits);
+UW = Round(High - BodyHigh, SQ_MarketDigits);
+BLa = Round(AbsValue(Open-Close), SQ_MarketDigits);
+BL90 = Round(BLa * Candle_Percent, SQ_MarketDigits);
+
+LW_D2 = Round(LW / 2, SQ_MarketDigits);
+LW_D3 = Round(LW / 3, SQ_MarketDigits);
+LW_D4 = Round(LW / 4, SQ_MarketDigits);
+BL90_M2 = Round(BL90 * 2, SQ_MarketDigits);
+CL_MPV = Round(CandleLength * tickSize, SQ_MarketDigits);
+
+SQ_Hammer = 0;
+
+if ((Low <= Low[1]) and (Low < Low[2]) and (Low < Low[3]))  then begin
+    if (LW_D2 > UW and LW > BL90_M2 and CL >= CL_MPV and O <> C and LW_D3 <= UW and LW_D4 <= UW)  then begin
+        SQ_Hammer = 1;
+	end;
+    if (LW_D3 > UW and LW > BL90_M2 and CL >= CL_MPV and O <> C and LW_D4 <= UW) then begin
+        SQ_Hammer = 1;
+	end;
+	if (LW_D4 > UW and LW > BL90_M2 and CL >= CL_MPV and O <> C) then begin
+     	SQ_Hammer = 1;
+	end;
+end;
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_Hammer[1];

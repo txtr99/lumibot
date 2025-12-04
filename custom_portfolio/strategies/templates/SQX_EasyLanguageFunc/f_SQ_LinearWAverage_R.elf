@@ -1,0 +1,9 @@
+inputs: 
+	Price( numericseries ), 
+	Length( numericsimple ),    { this input should be a constant >= 1 }
+	ApplyRound(numericsimple) ; 
+
+Value1 = SQ_LinearWAverage(Price, Length);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_LinearWAverage_R = Value1;
+

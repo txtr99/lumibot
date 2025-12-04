@@ -1,0 +1,6 @@
+inputs: 
+	Period( numericsimple ), ApplyRound(NumericSimple);
+
+Value1 = SQ_ATR(Period);
+If ApplyRound = 1 then Value1 = Round(Value1, 6);
+SQ_ATR_R = Value1;

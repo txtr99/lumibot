@@ -1,0 +1,4 @@
+Value1 = CurrentContracts;
+If Value1 = 0 then SQ_MarketPositionsCount = 0 Else SQ_MarketPositionsCount = 1;
+
+ 

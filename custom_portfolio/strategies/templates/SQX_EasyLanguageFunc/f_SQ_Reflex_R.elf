@@ -1,0 +1,7 @@
+Inputs:
+	Length(numericsimple), ApplyRound(NumericSimple);
+
+Value1 = SQ_Reflex(Length);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_Reflex_R = Value1;
+

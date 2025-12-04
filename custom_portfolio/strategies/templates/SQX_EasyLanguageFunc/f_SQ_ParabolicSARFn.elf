@@ -1,0 +1,100 @@
+inputs:
+	double Step( numericsimple ),
+	double Maximum( numericsimple );
+
+arrays:
+	AFBuffer[3]( 0 ),
+	EPBuffer[3]( 0 ),
+	Value[3]( 0 );
+	
+vars:
+	int ExtLastRevPos( 0 ),
+	bool ExtDirectionLong( false );
+
+{shift buffers}
+
+For Value10 = 2 to 1 begin
+	AFBuffer[Value10] = AFBuffer[Value10 - 1];
+	EPBuffer[Value10] = EPBuffer[Value10 - 1];
+	Value[Value10] = Value[Value10 - 1];
+end;
+
+if Currentbar < 4 then begin
+	AFBuffer[0] = 0;
+	EPBuffer[0] = 0;
+	Value[0] = 0;
+end
+Else begin
+	if Currentbar = 4 then begin
+		AFBuffer[2] = Step;
+		AFBuffer[1] = Step;
+		
+		EPBuffer[2] = Low[1];
+		EPBuffer[1] = Low[1];
+		
+		ExtLastRevPos = 1;
+		ExtDirectionLong = false;
+		
+		Value[2] = High[2];
+		Value[1] = MaxList(High[2], High[1]);
+	end;
+	
+	If ExtDirectionLong then begin
+		If Value[1] > Low[1] then begin
+			ExtDirectionLong = false;
+			Value[1] = SQ_Highest(High, Currentbar - ExtLastRevPos + 1)[1];
+			EPBuffer[1] = Low[1];
+			AFBuffer[1] = Step;
+			ExtLastRevPos = CurrentBar;
+		end;
+	end
+	Else begin
+		If Value[1] < High[1] then begin
+			ExtDirectionLong = true;
+			Value[1] = SQ_Lowest(Low, Currentbar - ExtLastRevPos + 1)[1];
+			EPBuffer[1] = High[1];
+			AFBuffer[1] = Step;
+			ExtLastRevPos = CurrentBar;
+		end;
+	end;
+
+	If ExtDirectionLong then begin
+		If High[1] > EPBuffer[2] and ExtLastRevPos <> Currentbar then begin
+			EPBuffer[1] = High[1];
+			AFBuffer[1] = AFBuffer[2] + Step;
+			
+			If AFBuffer[1] > Maximum then AFBuffer[1] = Maximum;
+		end
+		Else begin
+			If ExtLastRevPos <> Currentbar then begin
+				AFBuffer[1] = AFBuffer[2];
+				EPBuffer[1] = EPBuffer[2];
+			end;
+		end;
+		
+		Value[0] = Value[1] + AFBuffer[1] * (EPBuffer[1] - Value[1]);
+		If Value[0] > Low[1] or Value[0] > Low[2] then Value[0] = MinList(Low[1], Low[2]);
+	end
+	Else begin
+		If Low[1] < EPBuffer[2] and ExtLastRevPos <> Currentbar then begin
+			EPBuffer[1] = Low[1];
+			AFBuffer[1] = AFBuffer[2] + Step;
+			
+			If AFBuffer[1] > Maximum then AFBuffer[1] = Maximum;
+		end
+		Else begin
+			If ExtLastRevPos <> Currentbar then begin
+				AFBuffer[1] = AFBuffer[2];
+				EPBuffer[1] = EPBuffer[2];
+			end;
+		end;
+		
+		Value[0] = Value[1] + AFBuffer[1] * (EPBuffer[1] - Value[1]);
+		If Value[0] < High[1] or Value[0] < High[2] then Value[0] = MaxList(High[1], High[2]);
+	end;
+end;
+
+SQ_ParabolicSARFn = Value[0];
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+{If false then Value3 = SQ_ParabolicSARFn[1];}

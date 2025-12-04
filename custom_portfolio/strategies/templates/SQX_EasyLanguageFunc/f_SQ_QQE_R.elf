@@ -1,0 +1,12 @@
+inputs: 
+	rSIPeriod(numericsimple), 
+	sF(numericsimple), 
+	wF(numericsimple),
+	Line(numericsimple), 
+	ApplyRound(NumericSimple);
+
+Value1 = SQ_QQE(rSIPeriod, sF, wF, Line);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_QQE_R = Value1;
+
+

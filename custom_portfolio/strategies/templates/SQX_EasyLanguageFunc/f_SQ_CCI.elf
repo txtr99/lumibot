@@ -1,0 +1,28 @@
+inputs: 
+	Price( numericseries ), 
+	Period( numericsimple );
+
+variables: 
+	Mean( 0 ), 
+	AvgDev( 0 ), 
+	Counter( 0 ) ;
+
+Mean = Average( Price, Period ) ; 
+ 
+AvgDev = 0 ;
+
+for Counter = 0 to Period - 1 
+	begin
+	AvgDev = AvgDev + AbsValue( Price[Counter] - Mean ) ;
+	end ;
+
+if Period <> 0 then { prevent divide by zero error }
+	AvgDev = AvgDev / Period ;
+
+if AvgDev = 0 then
+	SQ_CCI = 0
+else
+	SQ_CCI = ( Price - Mean ) / ( .015 * AvgDev ) ;
+	
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_CCI[1]

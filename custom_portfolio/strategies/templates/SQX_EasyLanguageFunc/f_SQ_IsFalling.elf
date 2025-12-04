@@ -1,0 +1,34 @@
+inputs:
+	InputData( numericseries ),
+	BarCount( numericsimple ),
+	NotStrict( truefalse );
+
+vars:	
+	IsFalling( 0 ), PrevValue(0), CurrValue(0), Index(0);
+	
+PrevValue = InputData[BarCount-1];
+IsFalling = 0;
+
+For Index = 1 to BarCount-1 begin
+
+	CurrValue = InputData[BarCount - 1 - Index];	
+	
+	If (CurrValue > PrevValue) then begin
+		// indicator is rising, not falling
+		IsFalling = 0;
+		break;
+	end;
+			
+	if(NotStrict = false and CurrValue = PrevValue) then begin
+		IsFalling = 0;
+		break;
+	end;
+	
+	if(CurrValue < PrevValue) then begin
+		IsFalling = 1;
+	end;
+	
+	PrevValue = CurrValue;	
+end;
+
+SQ_IsFalling = IsFalling;

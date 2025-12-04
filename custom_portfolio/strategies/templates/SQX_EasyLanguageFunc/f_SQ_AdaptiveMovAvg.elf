@@ -1,0 +1,7 @@
+inputs: 
+	PriceSeries(NumericSeries), ERPrd( numericsimple ), ShrPrd( numericsimple), LngPrd( numericsimple);
+
+SQ_AdaptiveMovAvg = AdaptiveMovAvg(PriceSeries,ERPrd,ShrPrd,LngPrd);
+
+
+

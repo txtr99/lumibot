@@ -1,0 +1,30 @@
+inputs: 
+	Fractal( numericsimple );
+	
+vars:
+	FractalUsed( 0 ),
+	EachSideLength( 0 ),
+	MiddleBar( 0 ),
+	DCurrentHigh( 0 ),
+	BFoundHigh( false );
+	
+If (Fractal - 1) / 2 <= 0 Then FractalUsed = 3 Else FractalUsed = Fractal;
+	
+EachSideLength = (FractalUsed - 1) / 2;
+MiddleBar = eachSideLength + 1;
+DCurrentHigh = High[middleBar]; 
+BFoundHigh = true;
+
+For Value1 = FractalUsed downto 1 begin
+	If(Value1 <> MiddleBar) Then begin
+    	If High[Value1] >= DCurrentHigh then BFoundHigh = false;
+    End;	
+end;
+
+If CurrentBar < FractalUsed Then
+	SQ_FractalUp = 0
+Else
+	If BFoundHigh Then SQ_FractalUp = DCurrentHigh Else SQ_FractalUp = 0; 
+	 
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_FractalUp[1];

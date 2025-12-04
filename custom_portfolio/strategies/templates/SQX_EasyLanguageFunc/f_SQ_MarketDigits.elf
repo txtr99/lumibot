@@ -1,0 +1,9 @@
+Value1 = PriceScale;
+Value2 = 0;
+
+While Value1 >= 1 Begin
+	Value1 = Value1 / 10;
+	Value2 = Value2 + 1;
+End;
+
+If Value2 > 0 Then SQ_MarketDigits = Value2 - 1 Else SQ_MarketDigits = 0;

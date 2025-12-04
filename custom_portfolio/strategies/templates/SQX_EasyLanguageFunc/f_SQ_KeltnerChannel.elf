@@ -1,0 +1,19 @@
+inputs: 
+	Period( numericsimple ), 
+	Deviation( numericsimple ),
+	Line( numericsimple );
+	
+variables:
+	middle( 0 ),
+	offset( 0 );
+
+middle = Average(TypicalPrice, Period);
+offset = Average(Range, Period) * Deviation;
+
+If Line = 1 then
+	SQ_KeltnerChannel = middle - offset
+Else 
+	SQ_KeltnerChannel = middle + offset;
+	
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_KeltnerChannel[1];

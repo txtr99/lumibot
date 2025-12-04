@@ -1,0 +1,54 @@
+inputs:
+	OpenPrice( numericsimple ), 
+	RiskPercent( numericsimple ),
+	ATRPeriod( numericsimple ),
+	ATRMultiplier( numericsimple ),
+	Decimals( numericsimple ),
+	LotsIfNoMM( numericsimple ),		
+	MaxLots( numericsimple ),
+	InitialCapital( numericsimple ),
+	Multiplier( numericsimple );
+
+vars:
+	double ATRValue( 0 ),
+	double StopDistanceTicks( 0 ),
+    double SLInPips( 0 ),
+  	double OneLotSLInMoney( 0 ),
+    double MoneyToRisk( 0 ),
+  	double TradeSize( 0 );
+
+// Get ATR value
+ATRValue = AvgTrueRange(ATRPeriod)[1];
+
+// Validate ATR and calculate position size
+If ATRValue > 0 then begin
+	// Calculate stop distance in ticks: (ATR × ATRMult) ÷ MinMove
+	StopDistanceTicks = (ATRValue * ATRMultiplier) / MinMove;
+
+	// Convert to pips for calculation
+	SLInPips = StopDistanceTicks * MinMove * PriceScale;
+     
+	// Calculate money to risk based on current equity
+	MoneyToRisk = (InitialCapital + NetProfit + OpenPositionProfit) * RiskPercent / 100;
+
+	// Calculate what 1 lot would risk with this stop
+	OneLotSLInMoney = SLInPips / PriceScale * BigPointValue;
+
+	// Calculate position size
+	If OneLotSLInMoney > 0 then
+		TradeSize = IntPortion(MoneyToRisk / OneLotSLInMoney * Power(10, Decimals)) / Power(10, Decimals) //Round down to Decimals
+	Else 
+		TradeSize = 0;
+
+	// Apply multiplier
+	TradeSize = IntPortion(TradeSize * Multiplier);
+
+	// Apply minimum and maximum lot constraints
+	If TradeSize <= 0 then TradeSize = LotsIfNoMM;
+	If TradeSize > MaxLots then TradeSize = MaxLots;
+end
+Else begin
+	TradeSize = LotsIfNoMM;
+end;
+		
+SQ_ATRRiskBasedSizing = TradeSize;

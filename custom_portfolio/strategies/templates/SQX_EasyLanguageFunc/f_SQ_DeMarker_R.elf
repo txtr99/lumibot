@@ -1,0 +1,6 @@
+inputs:
+	Period( numericsimple ), ApplyRound(NumericSimple);
+
+Value1 = SQ_DeMarker(Period);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_DeMarker_R = Value1;

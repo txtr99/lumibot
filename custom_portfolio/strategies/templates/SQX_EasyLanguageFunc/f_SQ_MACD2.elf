@@ -1,0 +1,22 @@
+inputs: 
+	Price( numericseries ), 
+	FastLength( numericsimple ), 
+	SlowLength( numericsimple ),
+	Smooth( numericsimple ),
+	Line( numericsimple ) ;
+
+Switch (Line)
+Begin
+	case 0: begin // MACD Main
+		SQ_MACD2 = MACD(Price, FastLength, SlowLength);
+		end;
+	
+	case 1: begin // MACD Signal
+		SQ_MACD2 = Average(MACD(Price, FastLength, SlowLength), Smooth);
+		end;
+End;
+
+Print(File("D:\\TestStartBarIndy.txt"),FormatDate( "yyyy.MM.dd", ElDateToDateTime( Date[0] )), " ", FormatTime( "hh:mm:ss", ElTimeToDateTime( Time[0] )), "BAR, Open ", Open[0]); 
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value3 = SQ_MACD2[1];

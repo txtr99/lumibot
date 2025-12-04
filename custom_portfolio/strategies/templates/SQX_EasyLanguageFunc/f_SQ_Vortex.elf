@@ -1,0 +1,11 @@
+inputs: 
+	Period( numericsimple ), Line( numericsimple );
+	
+If Line = 0 then
+	SQ_Vortex = SQ_VortexPlus( Period )
+Else 
+	SQ_Vortex = SQ_VortexMinus( Period );
+
+	
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_Vortex[1];

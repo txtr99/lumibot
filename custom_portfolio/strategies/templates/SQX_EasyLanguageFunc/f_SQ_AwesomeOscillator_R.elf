@@ -1,0 +1,7 @@
+inputs: 
+	ApplyRound(numericsimple);
+
+
+Value1 = SQ_AwesomeOscillator;
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_AwesomeOscillator_R = Value1;

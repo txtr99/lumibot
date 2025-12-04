@@ -1,0 +1,17 @@
+inputs:
+	tickSize( numericsimple );
+
+vars:
+	priceDiff( 0 ),
+	maxValue( 0 );
+	
+priceDiff = Round(AbsValue(Open - Close), SQ_MarketDigits);	
+maxValue = Round(0.6 * tickSize, SQ_MarketDigits);	
+	
+if priceDiff < maxValue then begin
+	SQ_Doji = 1;
+end Else
+	SQ_Doji = 0;
+	
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_Doji[1];

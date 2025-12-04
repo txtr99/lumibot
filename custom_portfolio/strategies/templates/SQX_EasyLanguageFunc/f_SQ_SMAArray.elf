@@ -1,0 +1,12 @@
+inputs: 
+	PriceArray[MaxSize]( numericarray ), 
+	Period( numericsimple ),
+	Count( numericsimple ); 
+	
+Value1 = 0;
+
+For Value2 = 0 to Minlist(Period - 1, Count - 1) begin
+	Value1 += PriceArray[Value2];
+End; 
+
+SQ_SMAArray = Value1 / Minlist(Period, Count);

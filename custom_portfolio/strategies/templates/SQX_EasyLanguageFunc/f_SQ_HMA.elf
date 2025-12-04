@@ -1,0 +1,24 @@
+{ Search Tag: WA-HMA }
+
+{ Calculates values of the Hull moving average. }
+
+inputs: 
+	double Price( numericseries ), 
+	double Length( numericsimple ) ; 
+
+variables:
+	int HalfLength( 0 ),
+	int SqRtLength( 0 ) ;
+
+HalfLength = IntPortion( Length * 0.5 ) astype int ;
+SqRtLength = IntPortion( SquareRoot( Length ) ) astype int ;
+	
+if Length > 1 then
+	SQ_HMA = WAverage( 2 * WAverage( Price, HalfLength  ) - WAverage( Price, Length ), SqRtLength )
+else
+	RaiseRunTimeError( !( "HMA length input must be greater than 1." ) ) ;
+	
+
+{ ** Copyright ?? TradeStation Technologies, Inc.  All Rights Reserved ** 
+  ** TradeStation reserves the right to modify or overwrite this analysis technique 
+     with each release. ** }

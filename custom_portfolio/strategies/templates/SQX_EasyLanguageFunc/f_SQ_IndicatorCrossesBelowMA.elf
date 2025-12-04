@@ -1,0 +1,122 @@
+// Indicator Crosses Below MA
+inputs:
+    Indicator(numericseries),
+    Period(numericsimple),
+    MAType(numericsimple);
+
+vars:
+    IndicatorValue(0),
+    PrevIndicatorValue(0),
+    MAValue(0),
+    PrevMAValue(0),
+    Sum(0),
+    Weight(0),
+    WeightSum(0),
+    HalfPeriod(0),
+    TempMA(0),
+    index(0);
+
+// Get current and previous indicator values
+IndicatorValue = Round(Indicator[0], 6);
+PrevIndicatorValue = Round(Indicator[1], 6);
+
+// Calculate current MA value
+if MAType = 1 then begin  // Simple MA
+    Sum = 0;
+    for index = 0 to Period - 1 begin
+        Sum = Sum + Indicator[index];
+    end;
+    MAValue = Sum / Period;
+end
+else if MAType = 2 then begin  // Exponential MA
+    TempMA = Indicator[Period - 1];
+    for index = Period - 2 downto 0 begin
+        TempMA = (Indicator[index] * (2/(Period + 1))) + (TempMA * (1 - (2/(Period + 1))));
+    end;
+    MAValue = TempMA;
+end
+else if MAType = 3 then begin  // Weighted MA
+    Sum = 0;
+    WeightSum = 0;
+    for index = 0 to Period - 1 begin
+        Weight = Period - index;
+        Sum = Sum + (Indicator[index] * Weight);
+        WeightSum = WeightSum + Weight;
+    end;
+    MAValue = Sum / WeightSum;
+end
+else if MAType = 4 then begin  // Hull MA
+    HalfPeriod = Period / 2;
+    
+    // Calculate WMA with half period
+    Sum = 0;
+    WeightSum = 0;
+    for index = 0 to HalfPeriod - 1 begin
+        Weight = HalfPeriod - index;
+        Sum = Sum + (Indicator[index] * Weight);
+        WeightSum = WeightSum + Weight;
+    end;
+    TempMA = (Sum / WeightSum) * 2;
+    
+    // Calculate WMA with full period
+    Sum = 0;
+    WeightSum = 0;
+    for index = 0 to Period - 1 begin
+        Weight = Period - index;
+        Sum = Sum + (Indicator[index] * Weight);
+        WeightSum = WeightSum + Weight;
+    end;
+    MAValue = TempMA - (Sum / WeightSum);
+end;
+
+// Calculate previous MA value
+if MAType = 1 then begin  // Simple MA
+    Sum = 0;
+    for index = 1 to Period begin
+        Sum = Sum + Indicator[index];
+    end;
+    PrevMAValue = Sum / Period;
+end
+else if MAType = 2 then begin  // Exponential MA
+    TempMA = Indicator[Period];
+    for index = Period - 1 downto 1 begin
+        TempMA = (Indicator[index] * (2/(Period + 1))) + (TempMA * (1 - (2/(Period + 1))));
+    end;
+    PrevMAValue = TempMA;
+end
+else if MAType = 3 then begin  // Weighted MA
+    Sum = 0;
+    WeightSum = 0;
+    for index = 1 to Period begin
+        Weight = Period - index + 1;
+        Sum = Sum + (Indicator[index] * Weight);
+        WeightSum = WeightSum + Weight;
+    end;
+    PrevMAValue = Sum / WeightSum;
+end
+else if MAType = 4 then begin  // Hull MA
+    HalfPeriod = Period / 2;
+    
+    // Calculate WMA with half period
+    Sum = 0;
+    WeightSum = 0;
+    for index = 1 to HalfPeriod begin
+        Weight = HalfPeriod - index + 1;
+        Sum = Sum + (Indicator[index] * Weight);
+        WeightSum = WeightSum + Weight;
+    end;
+    TempMA = (Sum / WeightSum) * 2;
+    
+    // Calculate WMA with full period
+    Sum = 0;
+    WeightSum = 0;
+    for index = 1 to Period begin
+        Weight = Period - index + 1;
+        Sum = Sum + (Indicator[index] * Weight);
+        WeightSum = WeightSum + Weight;
+    end;
+    PrevMAValue = TempMA - (Sum / WeightSum);
+end;
+
+// Check crossing condition - changed to crosses below
+SQ_IndicatorCrossesBelowMA = PrevIndicatorValue > PrevMAValue AND IndicatorValue < MAValue;

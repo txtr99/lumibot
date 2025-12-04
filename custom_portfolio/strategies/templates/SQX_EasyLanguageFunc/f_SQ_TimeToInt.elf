@@ -1,0 +1,61 @@
+inputs:
+	timeStr ( StringSimple );
+
+vars:
+	hours(""),
+	minutes(""),
+	hoursInt(0),
+	minutesInt(0),
+	NbDays(0),
+	NbHours(0);
+
+value1 = StrLen(timeStr);
+if value1 >= 1 AND value1 <= 4 then begin
+
+	//Get hours number
+	If StrLen(timeStr) <= 2 then begin
+		hours = "0";	
+	end	
+	Else If StrLen(timeStr) = 3 then begin
+		hours = LeftStr(timeStr, 1);
+	end	
+	Else If StrLen(timeStr) = 4 then begin
+		If LeftStr(timeStr, 1) = "0" then begin
+			hours = MidStr(timeStr, 2, 1);
+		end
+		Else begin
+			hours = LeftStr(timeStr, 2);
+		End;
+	end;
+
+	//Get minutes number
+	If StrLen(timeStr) = 1 then begin
+		minutes = timeStr;
+	end	
+	Else If StrLen(timeStr) >= 2 then begin
+		If MidStr(timeStr, Strlen(timeStr) - 1, 1) = "0" then  begin
+			minutes = RightStr(timeStr, 1);
+		end
+		Else begin
+			minutes = RightStr(timeStr, 2);
+		End;
+	end;
+	
+	minutesInt = StrToNum(minutes);
+	hoursInt = StrToNum(hours);
+		
+	If minutesInt >= 60 then begin 
+		NbHours =  IntPortion(minutesInt / 60);	
+		minutesInt = minutesInt - (NbHours * 60);
+		hoursInt = hoursInt + NbHours;
+	end;
+	If hoursInt >= 24 then begin 
+		NbDays = IntPortion(hoursInt / 24);	
+		hoursInt = hoursInt - (NbDays * 24);
+	end;
+ 
+	SQ_TimeToInt = hoursInt * 100 + minutesInt;  
+end
+Else begin
+	SQ_TimeToInt = 0;
+end;

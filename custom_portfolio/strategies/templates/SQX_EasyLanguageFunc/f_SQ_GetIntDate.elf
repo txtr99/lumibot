@@ -1,0 +1,12 @@
+inputs: 
+	_Year( numericsimple ),
+	_Month( numericsimple ),
+	_Day( numericsimple );
+vars:
+	temp( 0 );
+
+temp += (_Year - 1900) * 10000;
+temp += _Month * 100;
+temp += _Day;	
+
+SQ_GetIntDate = temp;

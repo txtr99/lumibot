@@ -1,0 +1,170 @@
+inputs:
+	int StartHour( numericsimple ),
+	int StartMinute( numericsimple ),
+	int Line( Numericsimple );
+	
+vars:
+	int Period( 0 ),
+	int StartMinutesIntoDay( 0 ),
+	int CloseMinutesIntoDay( 0 ),
+	int PreviousClosingBar( 0 ),
+	int PreviousOpeningBar( 0 ),
+	double PreviousHigh( 0 ),
+	double PreviousLow( 0 ),
+	double PreviousClose( 0 ),
+	double pp( 0 ),
+	int LastClosingTime( 0 );
+	
+Method int getTFMinutes() begin
+	If BarInterval > 0 Then Value9 = BarInterval Else Value9 = 1;
+	 
+	Switch(Bartype) begin
+		Case 1:	{minute}
+			return Value9;
+		Case 2: {daily}
+			return Value9 * 24 * 60;
+		Case 3: {weekly}
+			Return Value9 * 7 * 24 * 60;
+		Case 14: {second}
+			Return Value9 / 60;
+		Default: 
+			Return Value9;
+	end;
+end;
+
+Method int getIntTime(int timeValue) begin
+vars:
+	int hours,
+	int minutes;
+
+	hours = IntPortion(timeValue / 100);
+	minutes = mod(timeValue, 100);
+	Return hours * 60 + minutes;
+end;
+
+Method int checkPivotsBarTime(int TimeToLookFor, int StartingBar, bool IsClosingBar) begin
+vars:
+	int PreviousBarsTime,
+	int CurrentBarsTime,
+	int NextBarsTime,
+	int PreviousBarDate,
+	int CurrentBarDate,
+	int NextBarDate;
+
+	If StartingBar < 1 Then Return 0
+	Else begin
+		PreviousBarsTime = getIntTime(Time[StartingBar - 1]);
+		CurrentBarsTime = getIntTime(Time[StartingBar]);
+		NextBarsTime = getIntTime(Time[StartingBar + 1]);
+		
+		PreviousBarDate = StrToNum(Formatdate("yyyyMMdd", ElDateToDateTime(Date[StartingBar - 1])));
+		CurrentBarDate = StrToNum(Formatdate("yyyyMMdd", ElDateToDateTime(Date[StartingBar])));
+		NextBarDate = StrToNum(Formatdate("yyyyMMdd", ElDateToDateTime(Date[StartingBar + 1])));
+	
+		If CurrentBarsTime = TimeToLookFor then Return 1
+		Else begin 
+			If NextBarDate <> CurrentBarDate then NextBarsTime -= 1440;
+	
+			If PreviousBarDate <> CurrentBarDate then begin 
+				If PreviousBarsTime > TimeToLookFor and CurrentBarsTime > TimeToLookFor Then Return 1 Else PreviousBarsTime += 1440;
+			end;
+	
+			If PreviousBarsTime > TimeToLookFor and NextBarsTime < TimeToLookFor Then begin
+				If not IsClosingBar Then Return 1 Else begin
+					If CurrentBarsTime < TimeToLookFor Then Return 1 Else Return 0; 
+				end;
+			end; 
+		end;
+		
+		Return 0;
+	end;
+end;
+
+Method int correctStartMinutes(int minutes) begin
+vars:
+	int temp;
+
+	temp = minutes;
+	
+	while not (Mod(temp, Period) = 0) begin
+	  	temp += 1;
+	end;
+	
+	If temp >= 1440 then Return (temp - 1440) Else Return temp;
+end; 
+
+Method int findLastTimeMatch(int TimeToLookFor, int StartingBar, int LastValue, bool IsClosingBar) begin
+vars:
+	int HowManyBarsBack;
+
+	If Period = 0 then Return StartingBar;
+	
+	HowManyBarsBack = minlist(Currentbar - 2, 1440 / Period * 3);
+	
+	If checkPivotsBarTime(TimeToLookFor, StartingBar, IsClosingBar) = 1 then Return StartingBar
+	Else begin
+		If LastValue < HowManyBarsBack and checkPivotsBarTime(TimeToLookFor, LastValue, IsClosingBar) = 1 then Return LastValue
+		Else begin
+			If LastValue < HowManyBarsBack and checkPivotsBarTime(TimeToLookFor, LastValue + 1, IsClosingBar) = 1 then Return LastValue + 1
+			Else begin
+				For Value1 = StartingBar to HowManyBarsBack begin
+					If Value1 = HowManyBarsBack - 1 then begin 
+						Value1 = Value1 + 1;
+						break;
+					end;
+					
+					If checkPivotsBarTime(TimeToLookFor, Value1, IsClosingBar) = 1 then break;
+				end;
+				
+				Return Value1;
+			end;
+		end;
+	end;
+end;
+	
+If Currentbar = 1 then begin
+	Value10 = StartHour;
+	Value11 = StartMinute;
+	
+	If StartHour < 0 or StartHour > 23 Then Value10 = 0;
+	If StartMinute < 0 or StartMinute > 59 Then Value11 = 0;
+
+	Period = getTFMinutes();
+	StartMinutesIntoDay = correctStartMinutes(Value10 * 60 + Value11);
+	CloseMinutesIntoDay = StartMinutesIntoDay - Period;
+	
+	If CloseMinutesIntoDay < 0 then CloseMinutesIntoDay += 1440;
+end
+Else begin
+	PreviousClosingBar = findLastTimeMatch(CloseMinutesIntoDay, 1, PreviousClosingBar, true);		
+	
+	If LastClosingTime <> Date[PreviousClosingBar] then begin
+		LastClosingTime = Date[PreviousClosingBar];
+		
+		PreviousOpeningBar = findLastTimeMatch(StartMinutesIntoDay, PreviousClosingBar + 1, 1000000, false);
+	
+		PreviousHigh = High[PreviousClosingBar];
+		PreviousLow = Low[PreviousClosingBar];
+		PreviousClose = Close[PreviousClosingBar];
+		
+		For Value1 = PreviousClosingBar to PreviousOpeningBar begin
+			If High[Value1] > PreviousHigh then PreviousHigh = High[Value1];
+			If Low[Value1] < PreviousLow then PreviousLow = Low[Value1];	
+		end;	
+	end;
+	
+	pp = (PreviousHigh + PreviousLow + PreviousClose) / 3;
+	
+	Switch(Line) begin
+    	Case 0: SQ_Pivots = pp;
+    	Case 1: SQ_Pivots = (2 * pp) - PreviousLow;
+    	Case 2: SQ_Pivots = pp + (PreviousHigh - PreviousLow);
+    	Case 3: SQ_Pivots = pp + 2 * (PreviousHigh - PreviousLow);
+    	Case 4: SQ_Pivots = (2 * pp) - PreviousHigh;
+    	Case 5: SQ_Pivots = pp - (PreviousHigh - PreviousLow);
+    	Case 6: SQ_Pivots = pp - 2 * (PreviousHigh - PreviousLow);
+    end;
+end;
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_Pivots[1];

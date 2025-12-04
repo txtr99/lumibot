@@ -1,0 +1,15 @@
+inputs:
+	OpenPrice( numericsimple ), 
+	RiskPercent( numericsimple ),
+	Decimals( numericsimple ),
+	InitialCapital( numericsimple ),
+	Multiplier( numericsimple );
+vars:
+  	double MoneyToRisk( 0 ),
+  	double TradeSize( 0 );
+
+MoneyToRisk = (InitialCapital + NetProfit) * RiskPercent / 100;
+TradeSize = IntPortion(MoneyToRisk / OpenPrice * Power(10, Decimals)) / Power(10, Decimals); //Round down to Decimals
+TradeSize = IntPortion(TradeSize * Multiplier);
+
+SQ_CryptoFixedPctBalance = TradeSize;

@@ -1,0 +1,8 @@
+
+SQ_BearishEngulfing = 0;
+
+if ((Close[1] > Open[1]) and (Open > Close) and (Open >= Close[1]) and (Open[1] >= Close) and ((Open - Close) > (Close[1] - Open[1]))) then
+	SQ_BearishEngulfing = 1;
+	
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_BearishEngulfing[1];

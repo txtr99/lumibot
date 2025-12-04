@@ -1,0 +1,12 @@
+inputs: 
+	Period( numericsimple ), Line( numericsimple );
+	
+If Line = 0 then
+	SQ_ADX = ADX( Period )
+Else if Line = 1 then
+	SQ_ADX = DMIPlus( Period )
+Else 
+	SQ_ADX = DMIMinus( Period );
+	
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_ADX[1];

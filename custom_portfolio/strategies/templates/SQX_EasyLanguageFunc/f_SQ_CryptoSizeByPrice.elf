@@ -1,0 +1,28 @@
+inputs:
+	OpenPrice( numericsimple ), 
+	UseAccountBalance( TrueFalseSimple ),	
+	MaxSize( numericsimple ),
+	Decimals( numericsimple ),
+	InitialCapital( numericsimple );
+vars:
+  	double Balance( 0 ),
+  	double TradeSize( 0 );
+
+
+If OpenPrice > 0 Then begin
+	Balance = InitialCapital + NetProfit;
+	If UseAccountBalance then TradeSize = Balance / OpenPrice Else TradeSize = (Balance + OpenPositionProfit) / OpenPrice;
+    
+    Value1 = 1;
+    For Value2 = 1 to Decimals begin
+    	Value1 = Value1 * 10;
+    end;
+    	
+	TradeSize = IntPortion(TradeSize * Value1) / Value1; //Round down to decimals
+  			
+	If TradeSize <= 0 then TradeSize = 1;
+	If TradeSize > MaxSize then TradeSize = MaxSize;
+end Else 
+	TradeSize = 0; 
+
+SQ_CryptoSizeByPrice = TradeSize;

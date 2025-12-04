@@ -1,0 +1,13 @@
+inputs: 
+	Period( numericsimple );
+
+variables:
+	lowestIndex( 0 ),
+	lowestValue( 0 ),
+	retVal( 0 );
+	
+retVal = SQ_Extremes(Range, Period, -1, lowestValue, lowestIndex);
+SQ_SmallestRange = lowestValue;
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value3 = SQ_SmallestRange[1];

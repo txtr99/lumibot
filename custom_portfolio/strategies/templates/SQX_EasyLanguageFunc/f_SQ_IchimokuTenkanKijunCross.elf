@@ -1,0 +1,46 @@
+inputs:
+	Direction( numericsimple ),
+	Tenkan_Sen_Length( numericsimple ), 
+	Kinjun_Sen_Length( numericsimple ), 
+	Senkou_Span_B_Length( numericsimple ), 
+	SignalStrength( numericsimple );
+	
+vars:
+	tenkan1(0),
+	tenkan0(0),
+	kijun1(0),
+	kijun0(0),
+	Signal(false),
+	KumoTop(0),
+	KumoBottom(0),
+	SignalStrengthUsed(0);
+	
+tenkan1 = SQ_Ichimoku(Tenkan_Sen_Length, Kinjun_Sen_Length, Senkou_Span_B_Length, 0)[1];
+tenkan0 = SQ_Ichimoku(Tenkan_Sen_Length, Kinjun_Sen_Length, Senkou_Span_B_Length, 0);
+kijun1 = SQ_Ichimoku(Tenkan_Sen_Length, Kinjun_Sen_Length, Senkou_Span_B_Length, 1)[1];
+kijun0 = SQ_Ichimoku(Tenkan_Sen_Length, Kinjun_Sen_Length, Senkou_Span_B_Length, 1);
+
+KumoTop = SQ_Ichimoku(Tenkan_Sen_Length, Kinjun_Sen_Length, Senkou_Span_B_Length, 2);
+KumoBottom = SQ_Ichimoku(Tenkan_Sen_Length, Kinjun_Sen_Length, Senkou_Span_B_Length, 3);
+
+If KumoBottom > KumoTop then begin 
+	Value1 = KumoBottom;
+	KumoBottom = KumoTop;
+	KumoTop = Value1;
+end;
+
+If Direction > 0 then 
+	Signal = (tenkan1 < kijun1) and (tenkan0 > kijun0) 
+Else 
+	Signal = (tenkan1 > kijun1) and (tenkan0 < kijun0);
+
+If SignalStrength >= 0 and SignalStrength <= 2 Then SignalStrengthUsed = SignalStrength Else SignalStrengthUsed = 1;
+
+If SignalStrengthUsed = 2 then begin
+	If Direction > 0 then Signal = (Signal and tenkan0 > kumoTop) Else Signal = (Signal and tenkan0 < kumoBottom);
+end
+Else if SignalStrengthUsed = 1 then begin 
+	If Direction > 0 then Signal = (Signal and tenkan0 > kumoBottom) Else Signal = (Signal and tenkan0 < kumoTop);
+end;
+
+If Signal then SQ_IchimokuTenkanKijunCross = 1 Else SQ_IchimokuTenkanKijunCross = 0;

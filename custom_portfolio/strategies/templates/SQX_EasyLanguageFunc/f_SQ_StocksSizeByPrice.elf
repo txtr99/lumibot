@@ -1,0 +1,25 @@
+inputs:
+	OpenPrice( numericsimple ), 
+	UseAccountBalance( TrueFalseSimple ),	
+	MaxSize( numericsimple ),
+	InitialCapital( numericsimple ),
+	Multiplier( numericsimple );
+vars:
+  	double Balance( 0 ),
+  	double TradeSize( 0 );
+
+
+If OpenPrice > 0 Then begin
+	Balance = InitialCapital + NetProfit;
+	If UseAccountBalance then TradeSize = Balance / OpenPrice Else TradeSize = InitialCapital / OpenPrice;
+    	
+	TradeSize = IntPortion(TradeSize); //Round down to integer
+  			
+	If TradeSize <= 0 then TradeSize = 1;
+end Else 
+	TradeSize = 0; 
+	
+TradeSize = IntPortion(TradeSize * Multiplier);
+If TradeSize > MaxSize then TradeSize = MaxSize;
+
+SQ_StocksSizeByPrice = TradeSize;

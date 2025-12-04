@@ -1,0 +1,4 @@
+inputs:
+	double Value( numericsimple );
+	
+SQ_ConvertToPips = Value / ( MinMove / Pricescale);

@@ -1,0 +1,38 @@
+inputs:
+	Period( numericsimple );
+
+variables:
+	avgDeMin( 0 ),
+	avgDeMax( 0 ),
+	res(0);
+	
+if Currentbar < Period + 1 then
+	begin
+	avgDeMin = 0;
+	avgDeMax = 0;
+	end
+Else if Currentbar = Period + 1 then
+	Begin
+	for Value1 = 0 to Period - 1
+		begin
+		avgDeMax += MaxList(High[Value1] - High[Value1 + 1], 0);
+		avgDeMin += MaxList(Low[Value1 + 1] - Low[Value1], 0);
+		end ;
+	avgDeMax = avgDeMax / Period;
+	avgDeMin = avgDeMin / Period;
+	end
+Else 
+	begin		
+	avgDeMax = (avgDeMax * Period - MaxList(High[Period] - High[Period + 1], 0) + MaxList(High[0] - High[1], 0)) / Period;
+	avgDeMin = (avgDeMin * Period - MaxList(Low[Period + 1] - Low[Period], 0) + MaxList(Low[1] - Low[0], 0)) / Period;
+	end;
+
+If avgDeMin + avgDeMax = 0 then begin
+	SQ_DeMarker = 0;
+end Else begin
+	res = avgDeMax / (avgDeMin + avgDeMax); 
+	SQ_DeMarker = res;	
+end;
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_DeMarker[1];

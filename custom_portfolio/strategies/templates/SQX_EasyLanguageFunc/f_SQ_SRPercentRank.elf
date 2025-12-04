@@ -1,0 +1,36 @@
+inputs: 
+	XMode(numericsimple),
+	Length( numericsimple ) , { this input should be a constant >= 1 }
+	ATRPeriod( numericsimple );
+
+vars:
+	index(0),
+	atrValue(0),
+	count(0),
+	percrank(0);
+
+    
+index = 1;
+count = 0;
+percrank = 0;
+atrValue = AvgTrueRange(ATRPeriod);
+
+    
+For index=1 To Length Begin
+	if(XMode = 1) then
+		
+		if(close[0] > low[index] and close[0] < high[index])then 
+ 	   	
+ 	   	count = count+1;
+ 	if(XMode = 2) then
+ 		if(close[0] > low[index]- atrValue and close[0] < high[index]+atrValue) then 
+ 	   	
+ 	   	count = count+1;
+	
+End;
+
+percrank = count/Length*100;
+SQ_SRPercentRank = percrank;	 
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = percrank[1];

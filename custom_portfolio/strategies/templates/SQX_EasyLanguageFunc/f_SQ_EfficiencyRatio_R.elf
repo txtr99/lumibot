@@ -1,0 +1,6 @@
+[LegacyColorValue = true]; 
+Inputs: Period(Numeric), ApplyRound(NumericSimple);
+
+Value1 = SQ_EfficiencyRatio(Period);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_EfficiencyRatio_R = Value1;

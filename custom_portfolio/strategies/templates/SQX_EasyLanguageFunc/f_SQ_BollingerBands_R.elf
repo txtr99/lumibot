@@ -1,0 +1,11 @@
+inputs:
+	Price( numericseries ),
+	Period( numericsimple ),
+	Deviation( numericsimple ),
+	Line( numericsimple ), 
+	ApplyRound(NumericSimple);
+
+Value1 = SQ_BollingerBands(Price, Period, Deviation, Line);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_BollingerBands_R = Value1;
+

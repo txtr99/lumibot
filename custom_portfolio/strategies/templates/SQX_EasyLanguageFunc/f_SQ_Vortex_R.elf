@@ -1,0 +1,6 @@
+inputs: 
+	Period( numericsimple ), Line( numericsimple ), ApplyRound(NumericSimple);
+
+Value1 = SQ_Vortex(Period, Line);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_Vortex_R = Value1;

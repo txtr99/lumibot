@@ -1,0 +1,6 @@
+inputs: 
+	VWAPPeriod(numericsimple), ApplyRound(NumericSimple);
+
+Value1 = SQ_VWAP(VWAPPeriod);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_VWAP_R = Value1;

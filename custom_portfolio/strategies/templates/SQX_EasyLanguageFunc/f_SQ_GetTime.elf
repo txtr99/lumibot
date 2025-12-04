@@ -1,0 +1,17 @@
+inputs: 
+	_Hour( numericsimple ),
+	_Minute( numericsimple ),
+	_Second( numericsimple );
+vars:
+	temp( "" );
+
+If _Hour < 10 then temp += "0";
+temp += Text(_Hour) + ":";
+
+If _Minute < 10 then temp += "0";
+temp += Text(_Minute) + ":";
+	
+If _Second < 10 then temp += "0";
+temp += Text(_Second);
+
+SQ_GetTime = temp;

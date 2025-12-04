@@ -1,0 +1,20 @@
+inputs:
+	KPeriod( numericsimple ),
+	DPeriod( numericsimple ),
+	Slowing( numericsimple ),
+	MAMethod( numericsimple ),
+	PriceField( numericsimple ),
+	Line( numericsimple );
+
+vars:
+	k( 0 ),
+	oFastK( 0 ),
+	oSlowD( 0 ) ;
+	
+Value1 = SQ_StochasticFn(KPeriod, DPeriod, Slowing, MAMethod, PriceField, k, oFastK, oSlowD);
+
+If Line = 0 then SQ_Stochastic = oFastK else SQ_Stochastic = oSlowD;
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_Stochastic[1];
+	

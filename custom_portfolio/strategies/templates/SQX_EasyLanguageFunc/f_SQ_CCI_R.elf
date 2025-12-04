@@ -1,0 +1,12 @@
+inputs: 
+	Price( numericseries ), 
+	Period( numericsimple ), 
+	ApplyRound(NumericSimple);
+
+Value1 = SQ_CCI(Price, Period);
+If ApplyRound = 1 then Value1 = Round(Value1, 6);	
+If ApplyRound = 2 then Value1 = Round(Value1, 4);       // for standard CCI signal blocks,  6 for woodies signal blocks
+SQ_CCI_R = Value1;
+
+
+

@@ -1,0 +1,36 @@
+Inputs:
+    PriceSeries(NumericSeries),  
+    Period(NumericSimple),
+    Deviation(NumericSimple);   
+
+Vars:
+    avgVal(0),
+    sum(0),
+    sko(0),
+    newRes(0),
+    fromBar(0),
+    i1(0);
+
+avgVal = Average(PriceSeries, Period);
+
+If CurrentBar > Period - 1 Then
+    fromBar = Period - 1
+Else
+    fromBar = CurrentBar - 1;
+
+sum = 0;
+
+For i1 = 0 To fromBar Begin
+    newRes = PriceSeries[i1] - avgVal;
+    sum = sum + newRes * newRes;
+End;
+
+sko = SquareRoot(sum / Period);
+
+If avgVal > 0 Then
+    SQ_BBWidthRatio = 2 * Deviation * sko / SQ_SMA(PriceSeries, Period)
+Else
+    SQ_BBWidthRatio = 0;
+   
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_BBWidthRatio[1]

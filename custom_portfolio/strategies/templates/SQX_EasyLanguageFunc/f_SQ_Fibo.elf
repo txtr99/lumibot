@@ -1,0 +1,92 @@
+using elsystem;
+
+inputs:
+	FiboRange( numericsimple ),
+	FiboLevel( numericsimple );
+	
+vars:
+	FiboRangeUsed( 0 );
+
+variables:
+	DateTime tfEndTime( null ),
+	barsUsed( -1 ),
+	prevTFOpen( 0 ), 
+	prevTFHigh( 0 ), 
+	prevTFLow( 0 ), 
+	prevTFClose( 0 ),
+	fiboValue( 0 );
+	
+Method bool isNewTFStart() begin
+    Switch(FiboRangeUsed) begin
+    	Case 1 to 8:
+    		If tfEndTime = null or tfEndTime <= Bardatetime then begin
+    			setEndTime();
+    			Return true;
+    		end
+    		Else return false;
+    	Case 9 to 10:
+    		Return barsUsed = -1;
+    end;
+end;  
+
+Method void setEndTime() begin
+	tfEndTime = DateTime.Create(Bardatetime.Year, Bardatetime.Month, Bardatetime.Day);
+    tfEndTime.Hour = 0;
+	tfEndTime.Minute = 0;
+	tfEndTime.Second = 0;
+			
+	Switch(FiboRangeUsed) begin
+    	Case 1, 5:
+    		tfEndTime.AddDays(1);
+    	Case 2, 6:
+    		For Value1 = 0 to 7 begin
+    			tfEndTime.AddDays(1);
+    			If tfEndTime.Format("%w") = "1" then break;	
+    		end;
+    	Case 3, 7:
+    		tfEndTime.Day = 1;
+    		tfEndTime.AddMonths(1);
+    	Case 4:
+    		return;
+    end;
+end; 
+
+If FiboRange >= 1 and FiboRange <= 7 Then FiboRangeUsed = FiboRange Else FiboRangeUsed = 1;
+
+If isNewTFStart() then begin	
+	Value3 = 0;	{Upper value}
+	Value4 = 0;	{Lower value}
+	
+	Switch(FiboRange) begin
+    	Case 1 to 3:
+    		Value3 = prevTFHigh;
+    		Value4 = prevTFLow;
+    	Case 5 to 7:
+    		Value3 = Maxlist(prevTFOpen, prevTFClose);
+    		Value4 = Minlist(prevTFOpen, prevTFClose);
+    end;
+    
+    Value5 = FiboLevel * (Value3 - Value4) / 100;		//delta
+    
+    If prevTFClose > prevTFOpen Then fiboValue = Value3 - Value5 Else fiboValue = Value4 + Value5;
+    
+    prevTFOpen = Open;
+    prevTFHigh = High;
+    prevTFLow = Low;
+    prevTFClose = Close;
+    
+    barsUsed = 1;
+end
+Else begin
+	prevTFHigh = Maxlist(prevTFHigh, High);
+    prevTFLow = Minlist(prevTFLow, Low);
+    prevTFClose = Close;
+    
+    barsUsed += 1;
+end;
+
+SQ_Fibo = fiboValue;
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_Fibo[1];
+	

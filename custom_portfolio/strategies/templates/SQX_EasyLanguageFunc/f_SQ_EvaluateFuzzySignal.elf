@@ -1,0 +1,22 @@
+inputs: 
+	Conditions[n](TrueFalseArrayRef),
+	ConditionsCount(numericsimple ), 
+	MinTrueConditions( numericsimple );
+
+variables: 
+	TrueConditions(0), Count(0);
+
+TrueConditions = 0;
+
+Count = MinList(ConditionsCount, n) - 1;
+
+if Count >= 0 then begin 
+	For Value1 = 0 to Count begin
+		If Conditions[Value1] then TrueConditions += 1;
+	end;
+
+	SQ_EvaluateFuzzySignal = TrueConditions >= MinTrueConditions;
+	
+End else begin
+    SQ_EvaluateFuzzySignal = false;
+end;

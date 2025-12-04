@@ -1,0 +1,49 @@
+inputs: 
+	Price( numericseries ), 
+	Length( numericsimple ),  { this input is assumed to be constant }
+	HiLo( numericsimple ), { this input is assumed to be constant; pass in 1 for 
+	 Highest(Bar), -1 for Lowest(Bar) }
+	oExtremeVal( numericref ), 
+	oExtremeBarRaw( numericref ) ;
+
+variables: 
+	MyVal( 0 ), 
+	MyBar( Length - 1 ) ; { this triggers the initial evaluation at CurrentBar = 1 }
+
+{ IF STARTING OUT, OR IF NEW BAR IS WORSE, UPDATE OLD BAR OFFSET: }
+if CurrentBar = 1 
+	or ( HiLo = 1 and Price <= MyVal ) 
+	or ( HiLo = -1 and Price >= MyVal ) 
+then
+	begin
+	MyBar = MyBar + 1 ;
+	{ IF UPDATED OFFSET OUTSIDE RANGE, GET NEW IN-RANGE EXTREME VAL AND ITS OFFSET: }
+	if MyBar > Length - 1 then
+		begin
+		MyVal = Price;
+		MyBar = 0;
+		for Value1 = 1 to Length - 1
+			begin
+			if ( HiLo = 1 and Price[Value1] >= MyVal ) 
+				or ( HiLo = -1 and Price[Value1] <= MyVal ) 
+			then
+				begin
+				MyVal = Price[Value1] ;
+				MyBar = Value1 ;
+				end ;
+			end ;
+		end ;
+	end 
+else { NEW BAR IS BETTER, SWITCH TO ITS PRICE & OFFSET }
+	begin
+	MyVal = Price ;
+	MyBar = 0 ;
+	end ;
+
+oExtremeVal = MyVal ;
+oExtremeBarRaw = MyBar ;
+
+SQ_EXTREMES = 1 ; { function return always 1, not used; only outputs used }
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value3 = SQ_EXTREMES[1];

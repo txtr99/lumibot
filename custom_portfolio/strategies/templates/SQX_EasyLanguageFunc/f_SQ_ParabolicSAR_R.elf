@@ -1,0 +1,8 @@
+inputs:
+	double AfStep( numericsimple ),
+	double AfLimit( numericsimple ),
+	ApplyRound(NumericSimple);
+
+Value1 = SQ_ParabolicSAR(AfStep, AfLimit);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_ParabolicSAR_R = Value1;

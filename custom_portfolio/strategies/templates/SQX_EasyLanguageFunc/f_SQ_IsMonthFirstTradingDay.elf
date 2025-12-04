@@ -1,0 +1,17 @@
+inputs:
+	IncludeWeekends( TrueFalse );
+
+variables:
+	monthFirstTradingDay(-1);		
+
+If monthFirstTradingDay = -1 Then monthFirstTradingDay = Date;
+
+If Month(monthFirstTradingDay) <> Month(Date) Then begin
+	Value1 = DayOfWeek(Date);
+
+	If IncludeWeekends or (Value1 > 0 and Value1 < 6) then begin
+		monthFirstTradingDay = Date;
+	end;
+end;
+
+If monthFirstTradingDay = Date then SQ_IsMonthFirstTradingDay = 1 Else SQ_IsMonthFirstTradingDay = 0;

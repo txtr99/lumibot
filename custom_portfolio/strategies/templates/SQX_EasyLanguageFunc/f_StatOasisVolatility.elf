@@ -1,0 +1,31 @@
+//StatOasis Market Volatility
+Input:{-------------------------------------------------------------------------------------}
+	Line( numericsimple );
+
+Vars:{-------------------------------------------------------------------------------------}
+	SO_Vix_Normalized (0),
+	SO_Vix2 (0),
+	iLookBack (120),
+	vColor2(0), 	Value(0),
+	RegimeState(0);
+	
+
+	SO_Vix2 = average (SQ_ATR(2)/Close, 20)*100 ;	
+	SO_Vix_Normalized = ((SO_Vix2 - Lowest(SO_Vix2,iLookBack)) / (Highest(SO_Vix2,iLookBack) - Lowest(SO_Vix2,iLookBack))) * 10 ;
+	
+	
+	if Line = 0 then 
+	Begin
+	StatOasisVolatility =  SO_Vix_Normalized;
+	end;
+	
+	If Line = 1 then
+	Begin
+		if SO_Vix_Normalized < 1 then StatOasisVolatility =  1;
+		if SO_Vix_Normalized > 1 AND SO_Vix_Normalized < 4 then StatOasisVolatility = 2 ;	
+		if SO_Vix_Normalized > 4 AND SO_Vix_Normalized < 8 then StatOasisVolatility = 3 ;	
+		if SO_Vix_Normalized > 8 then StatOasisVolatility = 4 ;
+	
+	end;
+
+	

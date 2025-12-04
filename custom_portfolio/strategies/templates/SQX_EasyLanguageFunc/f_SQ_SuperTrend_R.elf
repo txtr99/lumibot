@@ -1,0 +1,6 @@
+inputs: 
+STMode(numericsimple), ATReriod(numericsimple), ATRMultiplication(numericsimple), ApplyRound(NumericSimple); 
+
+Value1 = SQ_SuperTrend(STMode, ATReriod, ATRMultiplication);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_SuperTrend_R = Value1;

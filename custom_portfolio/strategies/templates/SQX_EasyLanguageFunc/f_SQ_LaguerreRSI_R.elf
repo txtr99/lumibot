@@ -1,0 +1,6 @@
+inputs: 
+	gam(numericseries), ApplyRound(NumericSimple);
+
+Value1 = SQ_LaguerreRSI(gam);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_LaguerreRSI_R = Value1;

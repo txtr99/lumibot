@@ -1,0 +1,9 @@
+inputs: 
+	XMode(numericsimple),
+	Length( numericsimple ) , { this input should be a constant >= 1 }
+	ATRPeriod( numericsimple ), 
+	ApplyRound(NumericSimple);
+
+Value1 = SQ_SRPercentRank(XMode, Length, ATRPeriod);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_SRPercentRank_R = Value1;

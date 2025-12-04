@@ -1,0 +1,42 @@
+inputs: 
+Type( numericsimple ),
+Shift( numericsimple ) ;
+
+vars: haClose(0),haOpen(0),haHigh(0),haLow(0); 
+
+if BarNumber = 1 then begin 
+haOpen = Open[Shift]; 
+haClose = (Open[Shift]+High[Shift]+Low[Shift]+Close[Shift])/4; 
+haHigh = MaxList( High[Shift], haOpen, haClose); 
+haLow = MinList( Low[Shift], haOpen,haClose); 
+end; 
+
+if BarNumber > 1 then begin 
+haClose = (Open[Shift]+High[Shift]+Low[Shift]+Close[Shift])/4; ////average bar price
+haOpen = (haOpen [1] + haClose [1])/2 ; ////avg open/close 1 bar ago
+haHigh = MaxList(High[Shift], haOpen, haClose) ; ////highest of high,open,close
+haLow = MinList(Low[Shift], haOpen, haClose) ; //// lowest of low, open, close
+end;
+
+Switch (Type)
+Begin
+	case 0: begin // HA open
+			SQ_HeikenAshi = haOpen;
+			end;
+	
+	case 1: begin // HA High
+			SQ_HeikenAshi = haHigh;
+			end;
+	
+	case 2: begin // HA Low
+			SQ_HeikenAshi = haLow;
+			end;
+	
+	case 3: begin // HA Close
+			SQ_HeikenAshi = haClose;
+			end;
+	
+End;
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_HeikenAshi[1];

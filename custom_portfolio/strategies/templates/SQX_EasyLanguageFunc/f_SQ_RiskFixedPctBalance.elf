@@ -1,0 +1,27 @@
+inputs:
+	OpenPrice( numericsimple ), 
+	SL( numericsimple ),
+	RiskPercent( numericsimple ),
+	Decimals( numericsimple ),
+	LotsIfNoMM( numericsimple ),		
+	MaxLots( numericsimple ),
+	InitialCapital( numericsimple ),
+	Multiplier( numericsimple );
+vars:
+  	double MoneyToRisk( 0 ),
+  	double OneLotSLInMoney( 0 ),
+  	double TradeSize( 0 );
+
+MoneyToRisk = (InitialCapital + NetProfit) * RiskPercent / 100;
+OneLotSLInMoney = Absvalue(OpenPrice - SL) * Bigpointvalue;
+
+If OneLotSLInMoney > 0 then
+	TradeSize = IntPortion(MoneyToRisk / OneLotSLInMoney * Power(10, Decimals)) / Power(10, Decimals) //Round down to Decimals
+Else 
+	TradeSize = 0;
+
+TradeSize = IntPortion(TradeSize * Multiplier);
+If TradeSize <= 0 then TradeSize = LotsIfNoMM;
+If TradeSize > MaxLots then TradeSize = MaxLots;
+  		
+SQ_RiskFixedPctBalance = TradeSize;

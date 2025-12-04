@@ -1,0 +1,23 @@
+inputs:
+	Direction( numericsimple ),
+	Tenkan_Sen_Length( numericsimple ), 
+	Kinjun_Sen_Length( numericsimple ), 
+	Senkou_Span_B_Length( numericsimple );
+	
+vars:
+	Signal(false),
+	KumoTop(0),
+	KumoBottom(0);
+	
+KumoTop = SQ_Ichimoku(Tenkan_Sen_Length, Kinjun_Sen_Length, Senkou_Span_B_Length, 2);
+KumoBottom = SQ_Ichimoku(Tenkan_Sen_Length, Kinjun_Sen_Length, Senkou_Span_B_Length, 3);
+
+If KumoBottom > KumoTop then begin 
+	Value1 = KumoBottom;
+	KumoBottom = KumoTop;
+	KumoTop = Value1;
+end;
+
+If Direction > 0 then Signal = (Open < KumoTop and Close > KumoTop) Else Signal = (Open > KumoBottom and Close < KumoBottom);
+
+If Signal then SQ_IchimokuKumoBreakout = 1 Else SQ_IchimokuKumoBreakout = 0;

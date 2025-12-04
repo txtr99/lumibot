@@ -1,0 +1,6 @@
+inputs: Length( numericsimple ), NumATRs( numericsimple ), ApplyRound(NumericSimple) ;
+
+Value1 = SQ_KeltnerChannelUp(Length, NumATRs);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_KeltnerChannelUp_R = Value1;
+

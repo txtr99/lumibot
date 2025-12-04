@@ -1,0 +1,53 @@
+inputs: 
+	rSIPeriod(numericsimple), 
+	sF(numericsimple), 
+	wF(numericsimple),
+	Line(numericsimple);
+
+variable: 
+	Wilders_Period(rSIPeriod * 2 - 1),
+	rsi0(0),
+	rsi1(0),
+	dar(0),
+	tr(0),
+	trPrev(0),
+	dv(0), 
+	Value_1(0), 
+	AtrRsi(0), 
+	MaAtrRsi(0);
+
+Value_1 = SQ_EMA(RSI(Close, rSIPeriod),sF);
+						
+AtrRsi = AbsValue(Value_1[1] - Value_1[0]);
+			
+MaAtrRsi = SQ_EMA(AtrRsi,Wilders_Period);
+		
+tr = trPrev;
+rsi1 = Value_1[1];
+
+rsi0 = Value_1[0];
+			
+//astra v1.1: Value 4.236 in v1.0 became default value for user adjustable variable "Filter".
+dar = SQ_EMA(MaAtrRsi, Wilders_Period)[0] * wF; //Filter;
+
+dv = tr;
+if (rsi0 < tr) then begin
+	tr = rsi0 + dar;
+	if (rsi1 < dv and tr > dv) then
+		tr = dv;
+end
+else if (rsi0 > tr) then begin
+	tr = rsi0 - dar;
+	if (rsi1 > dv and tr < dv) then
+		tr = dv;
+end;
+
+trPrev = tr;
+
+If Line = 0 then
+	SQ_QQE = Value_1
+Else
+	SQ_QQE = tr;
+	
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_QQE[1];

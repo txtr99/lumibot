@@ -1,0 +1,38 @@
+inputs:
+	Direction( numericsimple ),
+	Tenkan_Sen_Length( numericsimple ), 
+	Kinjun_Sen_Length( numericsimple ), 
+	Senkou_Span_B_Length( numericsimple ), 
+	SignalStrength( numericsimple );
+	
+vars:
+	KijunSen(0),
+	Signal(false),
+	KumoTop(0),
+	KumoBottom(0),
+	SignalStrengthUsed(0);
+	
+
+KijunSen = SQ_Ichimoku(Tenkan_Sen_Length, Kinjun_Sen_Length, Senkou_Span_B_Length, 1);
+
+If Direction > 0 then Signal = (Open < KijunSen and Close > KijunSen) Else Signal = (Open > KijunSen and Close < KijunSen);
+
+KumoTop = SQ_Ichimoku(Tenkan_Sen_Length, Kinjun_Sen_Length, Senkou_Span_B_Length, 2);
+KumoBottom = SQ_Ichimoku(Tenkan_Sen_Length, Kinjun_Sen_Length, Senkou_Span_B_Length, 3);
+
+If KumoBottom > KumoTop then begin 
+	Value1 = KumoBottom;
+	KumoBottom = KumoTop;
+	KumoTop = Value1;
+end;
+
+If SignalStrength >= 0 and SignalStrength <= 2 Then SignalStrengthUsed = SignalStrength Else SignalStrengthUsed = 1;
+
+If SignalStrengthUsed = 2 then begin
+	If Direction > 0 then Signal = (Signal and KijunSen > KumoTop) Else Signal = (Signal and KijunSen < KumoBottom);
+end
+Else if SignalStrengthUsed = 1 then begin 
+	If Direction > 0 then Signal = (Signal and KijunSen > KumoBottom) Else Signal = (Signal and KijunSen < KumoTop);
+end;
+
+If Signal then SQ_IchimokuKijunSenCross = 1 Else SQ_IchimokuKijunSenCross = 0;

@@ -1,0 +1,20 @@
+inputs:
+	InputType( string ),
+	InputShift( numericsimple );
+
+Switch(InputType) 
+Begin
+	Case "HighD": SQ_GetDInput = HighD(InputShift);
+	Case "LowD": SQ_GetDInput = LowD(InputShift);
+	Case "OpenD": SQ_GetDInput = OpenD(InputShift);
+	Case "CloseD": SQ_GetDInput = CloseD(InputShift);
+	Case "HighW": SQ_GetDInput = HighW(InputShift);
+	Case "LowW": SQ_GetDInput = LowW(InputShift);
+	Case "OpenW": SQ_GetDInput = OpenW(InputShift);
+	Case "CloseW": SQ_GetDInput = CloseW(InputShift);
+	Case "HighM": SQ_GetDInput = HighM(InputShift);
+	Case "LowM": SQ_GetDInput = LowM(InputShift);
+	Case "OpenM": SQ_GetDInput = OpenM(InputShift);
+	Case "CloseM": SQ_GetDInput = CloseM(InputShift);
+    Default: SQ_GetDInput = 0;
+ End;

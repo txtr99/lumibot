@@ -1,0 +1,35 @@
+inputs:
+    int TimeToLookFor( numericsimple ), 
+    int StartingBar( numericsimple ),
+    int Period( numericsimple ),
+    int LastValue( numericsimple ),
+    int IsClosingBar( numericsimple );
+vars:
+	HowManyBarsBack( 0 );
+
+If Period = 0 then SQ_findLastTimeMatch = StartingBar
+Else begin
+	HowManyBarsBack = minlist(Currentbar - 2, 1440 / Period * 3);
+	
+	If SQ_checkPivotsBarTime(TimeToLookFor, StartingBar, IsClosingBar) = 1 then SQ_findLastTimeMatch = StartingBar
+	Else begin
+		If LastValue < HowManyBarsBack and SQ_checkPivotsBarTime(TimeToLookFor, LastValue, IsClosingBar) = 1 then SQ_findLastTimeMatch = LastValue
+		Else begin
+			If LastValue < HowManyBarsBack and SQ_checkPivotsBarTime(TimeToLookFor, LastValue + 1, IsClosingBar) = 1 then SQ_findLastTimeMatch = LastValue + 1
+			Else begin
+				For Value1 = StartingBar to HowManyBarsBack begin
+					If Value1 = HowManyBarsBack - 1 then begin 
+						Value1 = Value1 + 1;
+						break;
+					end;
+					
+					If SQ_checkPivotsBarTime(TimeToLookFor, Value1, IsClosingBar) = 1 then break;
+				end;
+				
+				SQ_findLastTimeMatch = Value1;
+			end;
+		end;
+	end;
+
+end;
+

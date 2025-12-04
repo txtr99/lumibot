@@ -1,0 +1,7 @@
+inputs:
+	Price( numericseries ),
+	Period( numericsimple ), ApplyRound(NumericSimple);
+
+Value1 = SQ_LinearRegression(Price, Period);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_LinearRegression_R = Value1;

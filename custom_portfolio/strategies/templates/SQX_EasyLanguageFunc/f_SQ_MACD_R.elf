@@ -1,0 +1,12 @@
+inputs: 
+	Price( numericseries ), 
+	FastLength( numericsimple ), 
+	SlowLength( numericsimple ),
+	Smooth( numericsimple ),
+	Line( numericsimple ), 
+	ApplyRound(NumericSimple) ;
+
+Value1 = SQ_MACD(Price, FastLength, SlowLength, Smooth, Line);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_MACD_R = Value1;
+

@@ -1,0 +1,31 @@
+inputs: 
+STMode(numericsimple), ATReriod(numericsimple), ATRMultiplication(numericsimple); 
+
+vars: 
+ATR(0), 
+avg(0), 
+up(0), 
+dn(0), 
+ST(0);
+
+
+ATR = SQ_ATR(ATReriod)[0]; 
+avg = (high[0] + low[0])/2;
+
+
+up = avg + ATR*ATRMultiplication; 
+dn = avg - ATR*ATRMultiplication; 
+
+if close[0] > ST[1] and close[1] <= ST[1] then ST=dn
+
+else if close[0] < ST[1] and close[1] >= ST[1] then ST=up
+
+else if ST[1] < dn then ST=dn 
+
+else if ST[1] > up then ST=up 
+
+else  ST= ST[1] ; 
+
+SQ_SuperTrend=ST;
+
+

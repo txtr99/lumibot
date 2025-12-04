@@ -1,0 +1,43 @@
+inputs:
+	tickSize( numericsimple );
+
+vars:
+	BodyHigh(0), BodyLow(0), CL(0), LW(0), UW(0), BLa(0), BL90(0), UW_D2(0), UW_D3(0), UW_D4(0), BL90_M2(0), CL_MPV(0), Candle_Percent(0.9), CandleLength(12);
+
+if (Open > Close) then begin
+	BodyHigh = Open;
+    BodyLow = Close;
+end else begin
+	BodyHigh = Close;
+	BodyLow = Open;
+end;
+
+CL = High-Low;
+LW = Round(BodyLow - Low, SQ_MarketDigits);	
+UW = Round(High - BodyHigh, SQ_MarketDigits);	
+BLa = Round(AbsValue(Open - Close), SQ_MarketDigits);	
+BL90 = Round(BLa * Candle_Percent, SQ_MarketDigits);
+
+UW_D2 = Round(UW / 2, SQ_MarketDigits);	
+UW_D3 = Round(UW / 3, SQ_MarketDigits);	
+UW_D4 = Round(UW / 4, SQ_MarketDigits);		
+BL90_M2 = Round(2 * BL90, SQ_MarketDigits);	
+CL_MPV = Round(CandleLength * tickSize, SQ_MarketDigits);	
+
+SQ_ShootingStar = 0;
+
+if (High >= High[1] and High > High[2] and High > High[3]) then begin
+
+	if (UW_D2 > LW and UW > BL90_M2 and CL >= CL_MPV and O <> C and UW_D3 <= LW and UW_D4 <= LW) then
+		SQ_ShootingStar = 1;
+
+	if (UW_D3 > LW and UW > BL90_M2 and CL >= CL_MPV and O <> C and UW_D4 <= LW) then
+		SQ_ShootingStar = 1;
+
+	if (UW_D4 > LW and UW > BL90_M2 and CL >= CL_MPV and O <> C) then
+		SQ_ShootingStar = 1;
+
+end;
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_ShootingStar[1];

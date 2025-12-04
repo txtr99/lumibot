@@ -1,0 +1,11 @@
+variables:
+	fastMA( 0 ),
+	slowMA( 0 );
+	
+fastMA = Average(MedianPrice, 5);
+slowMA = Average(MedianPrice, 34);
+		
+SQ_AwesomeOscillator = fastMA - slowMA;
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_AwesomeOscillator [1];

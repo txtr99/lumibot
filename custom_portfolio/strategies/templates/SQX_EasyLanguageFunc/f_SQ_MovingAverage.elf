@@ -1,0 +1,24 @@
+inputs:
+	Price( numericseries ),
+	Type ( numericsimple ),
+	Period( numericsimple );
+	
+Switch(Type) begin
+	Case 0: 
+		SQ_MovingAverage = SQ_SMA(Price, Period);
+		break;
+	Case 1: 
+		SQ_MovingAverage = SQ_EMA(Price, Period);
+		break;
+	Case 2: 
+		SQ_MovingAverage = SQ_SMMA(Price, Period);
+		break;
+	Case 3: 
+		SQ_MovingAverage = SQ_LWMA(Price, Period);
+		break;
+	Default: 
+		SQ_MovingAverage = 0;
+end;
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_MovingAverage[1];

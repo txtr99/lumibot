@@ -1,0 +1,9 @@
+inputs: 
+	Price( numericseries ),
+	Period( numericsimple ), 
+	ApplyRound(NumericSimple);
+
+Value1 = SQ_EMA(Price, Period);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_EMA_R = Value1;
+

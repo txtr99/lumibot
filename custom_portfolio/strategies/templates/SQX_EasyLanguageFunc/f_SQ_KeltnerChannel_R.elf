@@ -1,0 +1,9 @@
+inputs: 
+	Period( numericsimple ), 
+	Deviation( numericsimple ),
+	Line( numericsimple ), 
+	ApplyRound(NumericSimple);
+
+Value1 = SQ_KeltnerChannel(Period, Deviation, Line);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_KeltnerChannel_R = Value1;

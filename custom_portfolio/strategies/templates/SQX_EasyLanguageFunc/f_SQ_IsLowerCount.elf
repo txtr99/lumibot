@@ -1,0 +1,33 @@
+inputs:
+	LeftInputData( numericseries ),
+	RightInputData( numericseries ),
+	BarCount( numericsimple ),
+	NotStrict( truefalse );
+
+vars:	
+	IsLowerCount( 0 ),LeftCurrValue(0),RightCurrValue(0), Index(0);
+	
+IsLowerCount = 0;
+
+For Index = 0 to BarCount-1 begin
+
+	LeftCurrValue = Round(LeftInputData[Index],5);	
+	RightCurrValue = Round(RightInputData[Index],5);
+
+	If (LeftCurrValue > RightCurrValue) then begin
+		IsLowerCount =0;
+		break;
+	end;
+	
+	If (NotStrict = false  and LeftCurrValue = RightCurrValue ) then begin
+		IsLowerCount =0;
+		break;
+	end;
+	
+	If (LeftCurrValue < RightCurrValue) then begin
+		IsLowerCount =1;
+	end;
+
+end;
+
+SQ_IsLowerCount = IsLowerCount;

@@ -1,0 +1,11 @@
+Inputs:
+    PriceSeries(NumericSeries),  
+    Period(NumericSimple),
+    Deviation(NumericSimple), 
+    ApplyRound(NumericSimple);   
+    
+Value1 = SQ_BBWidthRatio(PriceSeries, Period, Deviation);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_BBWidthRatio_R = Value1;
+
+

@@ -1,0 +1,22 @@
+inputs:
+	Values( numericseries ),
+	Period( numericsimple ),
+	N( numericsimple );
+	
+arrays:
+	temp[500](2147483647);
+	
+If N < 0 or N >= Period then SQ_IndicatorLowest = -1
+Else begin
+	
+	For Value1=0 to 499 begin
+		If Value1 < Period then temp[Value1] = Values[Value1] Else temp[Value1] = 2147483647;
+	end;
+	
+	Value2 = SortArray(temp, 500, 1);
+	
+	SQ_IndicatorLowest = temp[499 - N];
+end;
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_IndicatorLowest[1];

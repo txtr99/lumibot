@@ -1,0 +1,118 @@
+inputs:
+	type( numericsimple ),
+	startHours( numericsimple ),
+	startMinutes( numericsimple ),
+	endHours( numericsimple ),
+	endMinutes( numericsimple ),
+	daysShift( numericsimple );
+
+vars:
+	DAY_MINUTES(24*60),
+	startHHMM(0), 
+	endHHMM(0), 
+	double timeNow(0),
+	double prevTime(0),
+	double dayStart(0),	
+	double startTime(0),	
+	double endTime(0),
+	startDayJulian(0),
+	endDayJulian(0),
+	double sqSessionStartTime(-1), 
+	double sqSessionEndTime(-1), 
+	waitingForSession(true);
+	
+Array:
+	sessionOpen[100](-1),	
+	sessionHigh[100](-1),
+	sessionLow[100](-1),
+	sessionClose[100](-1);
+	
+
+once begin 
+	startHHMM = startHours * 100 + startMinutes;
+	endHHMM = endHours * 100 + endMinutes;
+end;
+
+timeNow = Date * 10000 + Time;
+
+If timeNow >= sqSessionEndTime then begin
+	If sessionClose[0] >= 0 Then begin
+		sessionClose[0] = Close[1];
+		
+		prevTime = Date[1] * 10000 + Time[1];
+		If prevTime >= sqSessionStartTime and prevTime < sqSessionEndTime then begin
+			sessionHigh[0] = MaxList(High[1], sessionHigh[0]);
+			sessionLow[0] = MinList(Low[1], sessionLow[0]);
+		end;
+	end;
+	
+	dayStart = Date * 10000;
+	
+	startDayJulian = DateToJulian(Date);	
+	endDayJulian = DateToJulian(Date);
+	
+	If startHHMM >= endHHMM then begin 
+		endDayJulian = endDayJulian + 1; 
+	end;
+	
+	endTime = JulianToDate(endDayJulian) * 10000 + endHours * 100 + endMinutes;
+	
+	If timeNow < (JulianToDate(endDayJulian - 1) * 10000 + endHours * 100 + endMinutes) Then begin
+		startDayJulian = startDayJulian - 1;
+		endDayJulian = endDayJulian - 1;
+	end
+	Else If timeNow > endTime or endTime = sqSessionStartTime then begin
+		startDayJulian = startDayJulian + 1;
+		endDayJulian = endDayJulian + 1;
+	end;
+	
+	Switch(type) begin
+	    	Case 1: 
+	    		sqSessionStartTime = JulianToDate(startDayJulian) * 10000 + startHours * 100 + startMinutes;
+	    		sqSessionEndTime = JulianToDate(endDayJulian) * 10000 + startHours * 100 + startMinutes;
+	    	Case 2:
+	    		sqSessionStartTime = JulianToDate(startDayJulian) * 10000 + startHours * 100 + startMinutes;
+	    		sqSessionEndTime = JulianToDate(endDayJulian) * 10000 + endHours * 100 + endMinutes;	
+	    	Case 3: 
+	    		sqSessionStartTime = JulianToDate(startDayJulian) * 10000 + startHours * 100 + startMinutes;
+	    		sqSessionEndTime = JulianToDate(endDayJulian) * 10000 + endHours * 100 + endMinutes;	
+	    	Case 4: 
+	    		sqSessionStartTime = JulianToDate(startDayJulian) * 10000 + endHours * 100 + endMinutes;
+	    		sqSessionEndTime = JulianToDate(endDayJulian) * 10000 + endHours * 100 + endMinutes;	
+	end;
+	
+	waitingForSession = true;
+end;
+
+If timeNow >= sqSessionStartTime then begin
+	If waitingForSession then begin
+		waitingForSession = false;
+		
+		For Value1 = 99 downto 1 begin
+			sessionOpen[Value1] = sessionOpen[Value1 - 1];			
+			sessionHigh[Value1] = sessionHigh[Value1 - 1];		
+			sessionLow[Value1] = sessionLow[Value1 - 1];		
+			sessionClose[Value1] = sessionClose[Value1 - 1];
+		end;
+		
+		sessionOpen[0] = Open;
+		sessionHigh[0] = High;
+		sessionLow[0] = Low;
+		sessionClose[0] = Close;
+	end 
+	Else begin
+		sessionHigh[0] = MaxList(High, sessionHigh[0]);
+		sessionLow[0] = MinList(Low, sessionLow[0]);
+		sessionClose[0] = Close;
+	end;
+end;
+
+Switch(type) begin
+    	Case 1: SQ_SessionOHLC = sessionOpen[daysShift]; 
+    	Case 2: SQ_SessionOHLC = sessionHigh[daysShift]; 
+    	Case 3: SQ_SessionOHLC = sessionLow[daysShift];     	
+    	Case 4: SQ_SessionOHLC = sessionClose[daysShift];
+end;
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_SessionOHLC[1];

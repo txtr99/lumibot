@@ -1,0 +1,9 @@
+inputs: 
+	var1( numericsimple ),
+	var2( numericsimple );
+vars:
+  	double value( 100000000 );
+
+if var2 <> 0 then
+	value = var1/var2;
+SQ_SafeDivide = value ;

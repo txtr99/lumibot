@@ -1,0 +1,6 @@
+inputs: Length( numericsimple ), NumDevs( numericsimple ), Unused( numericsimple ), ApplyRound(NumericSimple) ;
+
+Value1 = SQ_BollingerBandDown(Length, NumDevs, 0);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_BollingerBandDown_R = Value1;
+

@@ -1,0 +1,13 @@
+inputs:
+	KPeriod( numericsimple ),
+	DPeriod( numericsimple ),
+	Slowing( numericsimple ),
+	MAMethod( numericsimple ),
+	PriceField( numericsimple ),
+	Line( numericsimple ),
+	ApplyRound(NumericSimple);
+
+Value1 = SQ_Stochastic(KPeriod, DPeriod, Slowing, MAMethod, PriceField, Line);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_Stochastic_R = Value1;
+

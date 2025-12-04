@@ -1,0 +1,45 @@
+inputs: 
+	
+	UIMode(numericsimple), 
+	UIPeriod( numericsimple ) ; 
+
+variables: 
+	sumSqr( 0 ), 
+	hc( 0 ),
+	lc( 0 ),
+	dd( 0 ),
+	sum(0),
+	index (0);
+
+
+if UIMode = 1 then
+	begin
+	hc = Highest(close,UIPeriod);
+	dd = 100*((close-hc)/hc);
+	sum = 0;
+	for index = 0 to UIPeriod-1
+		begin
+			sum = sum + Square(dd[index]);
+		end;
+
+	SQ_UlcerIndex = Squareroot((sum/UIPeriod));
+	end;
+
+if UIMode = 2 then
+	begin
+	lc = 1/Lowest(close,UIPeriod);
+	dd = 100*((1/close-lc)/lc);
+	sum = 0;
+	for index = 0 to UIPeriod-1 
+		begin
+			sum = sum + Square(dd[index]);
+		end;
+	
+	SQ_UlcerIndex = Squareroot((sum/UIPeriod));
+	end;
+
+
+
+
+
+

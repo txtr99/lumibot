@@ -1,0 +1,9 @@
+inputs: 
+	Period( numericsimple ),
+	ComputedFrom( numericsimple ), 	{Close=0,Open=1,High=2,Low=3,Median=4,Typical=5,Weighted=6}
+       ApplyRound(NumericSimple);	
+
+Value1 = SQ_BullsPower(Period, ComputedFrom);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_BullsPower_R = Value1;
+

@@ -1,0 +1,7 @@
+inputs:
+	Length( numericsimple ), ApplyRound(NumericSimple);
+
+Value1 = SQ_VortexMinus(Length);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_VortexMinus_R = Value1;
+

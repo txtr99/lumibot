@@ -1,0 +1,25 @@
+inputs:
+
+	Length( numericsimple );
+variables:
+	VMPlus( 0 ),
+	VMMinus( 0 ),
+	VMPlusSum( 0 ),
+	VMMinusSum( 0 ),
+	TR( 0 ),
+	TRSum( 0 ),
+	VIPlusSumRge( 0 ),
+	VIMinusSumRge( 0 ) ;
+
+;
+VMMinus = AbsValue( Low - High[1] ) ;
+VMMinusSum = Summation( VMMinus, Length ) ;
+TR = TrueRange ;
+TRSum = Summation( TR, Length ) ;
+
+if TRSum <> 0  then
+	begin
+	
+	VIMinusSumRge = VMMinusSum / TRSum ;
+	end ;
+	SQ_VortexMinus = VIMinusSumRge;

@@ -1,0 +1,24 @@
+inputs:
+	tickSize( numericsimple );
+
+vars:
+	HL(0), OC(0), O1C1_D2(0), PCL_MTS(0), OC_HL(0), Piercing_Ratio(0.5), Piercing_Length(10);
+
+HL = Round(H - L, SQ_MarketDigits);
+OC = Round(O - C, SQ_MarketDigits);
+O1C1_D2 = Round((Open[1] + Close[1]) / 2, SQ_MarketDigits);
+PCL_MTS = Round(Piercing_Length * tickSize, SQ_MarketDigits);
+    	
+if((High - Low) <> 0) then begin
+	OC_HL = Round(OC / HL, 6);
+End else begin
+    OC_HL = 0;
+end;
+
+SQ_DarkCloud = 0;
+
+if ((Close[1] > Open[1]) and (O1C1_D2 > Close) and (Open > Close) and (Close > Open[1]) and (OC_HL > Piercing_Ratio) and (HL >= PCL_MTS)) then
+	SQ_DarkCloud = 1;
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value3 = SQ_DarkCloud[1];

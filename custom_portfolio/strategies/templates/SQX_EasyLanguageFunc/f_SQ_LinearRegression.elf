@@ -1,0 +1,29 @@
+inputs:
+	Price( numericseries ),
+	Period( numericsimple );
+
+variables:
+	sumX( 0 ),
+	divisor( 0 ),
+	sumXY( 0 ),
+	sum( 0 ),
+	slope( 0 ),
+	intercept( 0 );
+	
+sumX = Period * (Period - 1) / 2;
+divisor = sumX * sumX - Period * Period * (Period - 1) * (2 * Period - 1) / 6;
+sumXY = 0;
+
+for Value1 = 0 to Period - 1 begin
+	sumXY += Value1 * Price[Value1];
+end;
+
+sum = Summation(Price, Period);
+slope = (Period * sumXY - sumX * sum) / divisor;
+intercept = (sum - slope * sumX) / Period;
+
+SQ_LinearRegression = intercept + slope * (Period - 1);
+
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_LinearRegression[1];

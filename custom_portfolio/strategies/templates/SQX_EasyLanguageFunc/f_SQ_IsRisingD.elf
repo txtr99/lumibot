@@ -1,0 +1,36 @@
+inputs:
+	InputType( string ),
+	InputShift( numericsimple ),
+	BarCount( numericsimple ),
+	NotStrict( truefalse ),
+	Shift( numericsimple );
+
+vars:	
+	IsRising( 0 ), PrevValue(0), CurrValue(0), Index(0);
+	
+PrevValue = SQ_GetDInput(InputType,InputShift)[BarCount+Shift-1];
+IsRising = 0;
+
+For Index = 1 to BarCount-1 begin
+
+	CurrValue = SQ_GetDInput(InputType, InputShift)[BarCount+Shift-1-Index];
+	
+	If (CurrValue < PrevValue) then begin
+		// indicator is falling, not rising
+		IsRising = 0;
+		break;
+	end;
+			
+	if(NotStrict = false and CurrValue = PrevValue) then begin
+		IsRising = 0;
+		break;
+	end;
+	
+	if(CurrValue > PrevValue) then begin
+		IsRising = 1;
+	end;
+	
+	PrevValue = CurrValue;	
+end;
+
+SQ_IsRisingD = IsRising;

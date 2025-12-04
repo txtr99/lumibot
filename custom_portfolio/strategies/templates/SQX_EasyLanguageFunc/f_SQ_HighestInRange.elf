@@ -1,0 +1,47 @@
+inputs: 
+timeFrom( StringSimple ), timeTo( StringSimple ) ;
+
+vars:
+sqTimeFrom(-1), sqTimeTo(-1), _startDate(0), _endDate(0), highestValue(0), lastValue(0), lastUsableValue(0);
+
+If sqTimeFrom < 0 then begin
+	sqTimeFrom = SQ_TimeToInt(timeFrom);
+	sqTimeTo = SQ_TimeToInt(timeTo);
+	
+	_startDate = Date;
+	_endDate = Date;
+	
+	if sqTimeTo <= sqTimeFrom Then _endDate = CalcDate(Date, 1);
+End;
+
+If (Date > _endDate or (Date = _endDate and Time >= sqTimeTo)) Then Begin
+	_startDate = Date;
+	_endDate = Date;
+	
+	lastValue = highestValue;
+	highestValue = 0;
+	
+	If sqTimeTo <= Time Then begin
+		If sqTimeTo < sqTimeFrom Then begin
+			_endDate = CalcDate(_endDate, 1);
+		end
+		Else begin
+			_startDate = CalcDate(_startDate, 1);
+			_endDate = CalcDate(_endDate, 1);
+		end;
+	end;
+	
+	If sqTimeFrom <= Time Then highestValue = High;
+end
+Else begin
+	If (Date > _startDate or (Date = _startDate and Time >= sqTimeFrom)) Then highestValue = MaxList(highestValue, High) Else highestValue = 0;
+end;
+
+If lastValue > 0 Then begin
+	lastUsableValue = lastValue;
+	SQ_HighestInRange = lastValue;
+end
+Else SQ_HighestInRange = lastUsableValue;
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_HighestInRange[1];

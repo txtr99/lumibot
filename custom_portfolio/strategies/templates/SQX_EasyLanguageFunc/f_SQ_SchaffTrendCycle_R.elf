@@ -1,0 +1,6 @@
+Inputs: TCLen(NumericSimple), MA1(NumericSimple), MA2(NumericSimple), ApplyRound(NumericSimple);
+
+Value1 = SQ_SchaffTrendCycle(TCLen, MA1, MA2);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_SchaffTrendCycle_R = Value1;
+

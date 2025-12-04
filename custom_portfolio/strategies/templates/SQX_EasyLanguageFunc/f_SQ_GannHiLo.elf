@@ -1,0 +1,16 @@
+Inputs: Length(Numeric);
+Variables: Trend(0), HiLo(0), AvHigh(0), AvLow(0);
+
+Trend=Trend[1];
+
+AvLow=Average(Low,Length);
+AvHigh=Average(High,Length);
+
+
+if close>AvHigh[1] then Trend=1;
+if close<AvLow[1] then Trend=-1;
+
+///If Trend=1 then HiLo=AvLow[1] else HiLo=AvHigh[1];
+If Trend=1 then HiLo=AvLow[0] else HiLo=AvHigh[0];
+//Plot1(HiLo,"Gann HiLo");
+SQ_GannHiLo = HiLo;

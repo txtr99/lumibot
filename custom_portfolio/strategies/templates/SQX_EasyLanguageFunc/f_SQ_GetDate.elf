@@ -1,0 +1,16 @@
+inputs: 
+	_Year( numericsimple ),
+	_Month( numericsimple ),
+	_Day( numericsimple );
+vars:
+	temp( "" );
+
+temp = Text(_Year) + ".";
+
+If _Month < 10 then temp += "0";
+temp += Text(_Month) + ".";
+
+If _Day < 10 then temp += "0";
+temp += Text(_Day);
+	
+SQ_GetDate = temp;

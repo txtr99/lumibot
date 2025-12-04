@@ -1,0 +1,20 @@
+inputs: 
+	Period( numericsimple ), Line( numericsimple );
+	
+variables:
+	ExtremeValLow( 0 ),
+	ExtremeValHigh( 0 ),
+	ExtremeLowBar( 0 ),
+	ExtremeHighBar( 0 ),
+	RetVal( 0 ) ;
+
+RetVal = SQ_Extremes( Low, Period, -1, ExtremeValLow, ExtremeLowBar ) ;
+RetVal = SQ_Extremes( High, Period, 1, ExtremeValHigh, ExtremeHighBar ) ;
+
+If Line = 0 then
+	SQ_Aroon = 100 * ( Period - ExtremeHighBar ) / Period
+Else 
+	SQ_Aroon = 100 * ( Period - ExtremeLowBar ) / Period ;
+	
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value3 = SQ_Aroon[1];

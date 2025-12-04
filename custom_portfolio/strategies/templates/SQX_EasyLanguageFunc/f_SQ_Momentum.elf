@@ -1,0 +1,16 @@
+inputs: 
+	Price( numericseries ),
+	Period( numericsimple );
+
+vars:
+	val1(0);
+	
+	val1 = Price[Minlist(Period, Currentbar)];
+	if(val1 = 0) Then begin
+		val1 = 1;
+	end;
+		
+SQ_Momentum = 100 * Price[0] / val1;
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_Momentum[1];

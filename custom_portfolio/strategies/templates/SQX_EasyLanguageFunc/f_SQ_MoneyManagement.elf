@@ -1,0 +1,33 @@
+inputs:
+	CapitalSize(NumericSimple), SLSize(NumericSimple), MoneyManagementType(NumericSimple), TradeSize(NumericSimple), SizeRounding(NumericSimple), RiskPerTrade(NumericSimple), MaxTradeSize(NumericSimple);
+	
+vars:
+RiskInMoney(0.5), ComputedSize(0);
+
+
+if(MoneyManagementType = 0 or SLSize <= 0 or MoneyManagementType > 2) then begin
+	ComputedSize = TradeSize;
+End else begin
+	// compute real money management
+	if(MoneyManagementType = 1) then begin
+		// risk % of account per trade	
+		RiskInMoney = ((CapitalSize+NetProfit+OpenPositionProfit) * (RiskPerTrade / 100.0));
+		
+   		ComputedSize = Round( RiskInMoney / (SLSize* BigPointValue), SizeRounding); 
+		
+	End else begin
+		// risk fixed amount per trade
+		RiskInMoney = RiskPerTrade;
+		
+   		ComputedSize = Round( RiskInMoney / (SLSize* BigPointValue), SizeRounding); 
+		
+	end;
+end;
+
+if(ComputedSize < 1) then
+	ComputedSize = 2;
+
+if(MoneyManagementType > 0 and ComputedSize > MaxTradeSize) then 
+	ComputedSize = MaxTradeSize;
+
+SQ_MoneyManagement = ComputedSize;

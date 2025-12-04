@@ -1,0 +1,13 @@
+Inputs: InStr1(string);
+Vars:  OutStr(""), Char1("");
+
+OutStr = "";
+
+For value1 = 1 To StrLen(InStr1) Begin
+    Char1= MidStr(InStr1, value1 , 1);
+    
+    If Char1<> "/" And Char1<> "\" Then
+        OutStr = OutStr + Char1;
+End;
+
+SQ_RemoveSpecialChars = OutStr

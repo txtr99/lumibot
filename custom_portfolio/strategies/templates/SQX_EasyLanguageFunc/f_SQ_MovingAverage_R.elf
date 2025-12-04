@@ -1,0 +1,10 @@
+inputs:
+	Price( numericseries ),
+	Type ( numericsimple ),
+	Period( numericsimple ),
+	ApplyRound(NumericSimple);
+
+Value1 = SQ_MovingAverage(Price, Type, Period);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_MovingAverage_R = Value1;
+

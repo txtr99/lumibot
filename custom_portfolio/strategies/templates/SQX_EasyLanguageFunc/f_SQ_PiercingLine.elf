@@ -1,0 +1,25 @@
+inputs:
+	tickSize( numericsimple );
+
+vars:
+	HL(0), CO(0), CO_HL(0), O1C1_D2(0), PCL_MTS(0), Piercing_Ratio(0.5), Piercing_Length(10);
+
+HL = Round(High - Low, SQ_MarketDigits);	
+CO = Round(Close - Open, SQ_MarketDigits);
+
+if(HL <> 0) then begin
+	CO_HL = Round(CO / HL, 6);
+End else begin
+    CO_HL = 0;
+end;
+
+O1C1_D2 = Round((Open[1] + Close[1]) / 2, SQ_MarketDigits);
+PCL_MTS = Round(Piercing_Length * tickSize, SQ_MarketDigits);
+
+SQ_PiercingLine = 0;
+
+if (Close[1] < Open[1] and O1C1_D2 < Close and Open < Close and Close < Open[1] and CO_HL > Piercing_Ratio and HL >= PCL_MTS) then
+	SQ_PiercingLine = 1;
+
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_PiercingLine[1];

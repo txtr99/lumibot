@@ -1,0 +1,29 @@
+using elsystem;
+
+inputs:
+	IncludeWeekends( TrueFalse );
+
+variables:
+	DateTime dateTimeToday( null ),
+	DateTime lastTradingDay( null ),
+	DateTime temp( null );		
+
+dateTimeToday = Bardatetime;		
+lastTradingDay = Bardatetime;		
+temp = Bardatetime;
+temp.Day = 25;
+
+Value2 = lastTradingDay.Month;
+Value3 = 25;				//last non-weekend day
+
+While temp.Month = dateTimeToday.Month Begin
+	Value1 = DayOfWeek(temp.ELDate);
+	
+	If IncludeWeekends = true or (Value1 > 0 and Value1 < 6) Then Value3 = temp.Day;
+	
+	temp.AddDays(1);
+End;
+
+lastTradingDay.Day = Value3;
+
+If lastTradingDay.ELDate = dateTimeToday.ELDate Then SQ_IsMonthLastTradingDay = 1 Else SQ_IsMonthLastTradingDay = 0;

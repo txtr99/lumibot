@@ -1,0 +1,12 @@
+inputs:
+	Price( numericseries ),
+	FastEMA( numericsimple ),
+	SlowEMA( numericsimple ),
+	SignalPeriod( numericsimple ),
+	ApplyRound(NumericSimple);
+
+
+Value1 = SQ_OSMA(Price, FastEMA, SlowEMA, SignalPeriod);
+If ApplyRound = 1 then Value1 = Round(Value1 , 6);
+SQ_OSMA_R = Value1;
+

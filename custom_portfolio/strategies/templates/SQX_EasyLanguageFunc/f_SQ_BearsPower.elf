@@ -1,0 +1,23 @@
+inputs: 
+	Period( numericsimple ),
+	ComputedFrom( numericsimple ); 	{Close=0,Open=1,High=2,Low=3,Median=4,Typical=5,Weighted=6}
+
+Switch( ComputedFrom )
+Begin
+	Case 1:
+    	SQ_BearsPower = Low - XAverage(Open, Period);
+    Case 2:
+    	SQ_BearsPower = Low - XAverage(High, Period);
+    Case 3:
+    	SQ_BearsPower = Low - XAverage(Low, Period);
+    Case 4:
+    	SQ_BearsPower = Low - XAverage(MedianPrice, Period);
+    Case 5:
+    	SQ_BearsPower = Low - XAverage(TypicalPrice, Period);
+    Case 6:
+    	SQ_BearsPower = Low - XAverage(WeightedClose, Period);
+    Default:
+    	SQ_BearsPower = Low - XAverage(Close, Period);
+End;
+{ Force series function, since otherwise this function can verify as simple, but needs to be called at every bar to return correct results }
+If false then Value10 = SQ_BearsPower[1]

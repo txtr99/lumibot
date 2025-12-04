@@ -1,0 +1,46 @@
+{ 
+Reference:  Patrick G. Mulloy, "Smoothing Data With Faster Moving Averages,"
+Technical Analysis of Stocks and Commodities Magazine, Volume 12, Issue 1, January,
+1994 (11-19).
+}
+
+inputs:
+	int AppliedPrice( numericsimple ), { price used in exponential moving average
+	 calculation }
+	double Length( numericsimple ) ; { length used in exponential moving average 
+	 calcualtion }
+
+variables:
+	double XMA( 0 ),
+	double XMA2( 0 ) ;
+
+
+	
+	switch( AppliedPrice )begin
+	
+	case 0:  
+		XMA = XAverage( Close, Length ) ;
+		XMA2 = XAverage( XMA, Length ) ;
+		Break; 
+	case 1: 
+		XMA = XAverage( Open, Length ) ;
+		XMA2 = XAverage( XMA, Length ) ;
+		Break; 
+	case 2: 
+		XMA = XAverage( High, Length ) ;
+		XMA2 = XAverage( XMA, Length ) ;
+		Break; 
+	case 3: 
+		XMA = XAverage( Low, Length ) ;
+		XMA2 = XAverage( XMA, Length ) ;
+		Break; 
+	end;
+
+
+
+SQ_DEMA = 2 * XMA - XMA2 ;
+
+
+{ ** Copyright © TradeStation Technologies, Inc.  All Rights Reserved ** 
+  ** TradeStation reserves the right to modify or overwrite this analysis technique 
+     with each release. ** }
