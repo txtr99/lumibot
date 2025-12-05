@@ -1206,6 +1206,11 @@ def run_backtest(args):
         def initialize(self):
             """Initialize the portfolio manager."""
             PortfolioStrategy._base_capital = shared_initial_capital
+
+            # CRITICAL: Set market to us_futures for 24-hour trading
+            # Without this, backtest only iterates during NYSE hours (09:30-16:00 ET)
+            # which causes phantom P&L when futures trade 23/6 (Sun 6pm - Fri 5pm ET)
+            self.set_market("us_futures")
             # Track backtest window for progress logging (use private attrs to avoid clashing with properties)
             self._progress_start = backtesting_start
             self._progress_end = backtesting_end
@@ -1429,10 +1434,9 @@ def run_backtest(args):
                 if span > 0:
                     elapsed = (ct - start_dt).total_seconds()
                     pct = max(0.0, min(100.0, (elapsed / span) * 100))
-                    print(
-                        f"[INFO] Heartbeat: iteration {self._iteration_counter} at {current_time.isoformat()} "
-                        f"(calc progress {pct:.2f}%)",
-                        flush=True,
+                    logging.getLogger(__name__).info(
+                        f"Heartbeat: iteration {self._iteration_counter} at {current_time.isoformat()} "
+                        f"(calc progress {pct:.2f}%)"
                     )
             self.portfolio_manager.run_iteration(current_time)
             if self.debug_logs_enabled:
@@ -1445,7 +1449,38 @@ def run_backtest(args):
             print("\nBacktest interrupted")
 
         def trace_stats(self, context, snapshot_before):
-            """Silence per-iteration stats to avoid I/O overhead; let final results handle reporting."""
+            """Return attribution-based portfolio value for tearsheet equity curve."""
+            mgr = getattr(self, "portfolio_manager", None)
+            if mgr and getattr(mgr, "executor", None):
+                executor = mgr.executor
+                # Get initial capital
+                initial_capital = getattr(executor, "shared_initial_capital", 0.0) or 0.0
+
+                # Calculate total realized P&L
+                total_realized_pnl = sum(s.realized_pnl for s in executor.strategies)
+
+                # Calculate total unrealized P&L
+                total_unrealized_pnl = 0.0
+                current_time = self.get_datetime()
+                for strategy_state in executor.strategies:
+                    pos = strategy_state.tracker.get_position(strategy_state.symbol)
+                    if pos and pos.quantity != 0 and strategy_state.entry_price is not None:
+                        try:
+                            df = executor.shared_data.get_data_at_time(
+                                strategy_state.symbol, current_time, executor.max_lookback, executor.timestep
+                            )
+                            if df is not None and len(df) > 0:
+                                current_price = df["close"].iloc[-1]
+                                from custom_portfolio.data.futures_metadata import get_multiplier
+
+                                multiplier = get_multiplier(strategy_state.symbol)
+                                unrealized = (current_price - strategy_state.entry_price) * pos.quantity * multiplier
+                                total_unrealized_pnl += unrealized
+                        except Exception:
+                            pass
+
+                portfolio_value = initial_capital + total_realized_pnl + total_unrealized_pnl
+                return {"portfolio_value": portfolio_value}
             return {"report": None}
 
     # Set up backtesting
@@ -1466,7 +1501,7 @@ def run_backtest(args):
             show_plot=show_plot,
             show_tearsheet=show_tearsheet,
             show_indicators=show_indicators,
-            save_tearsheet=False,
+            save_tearsheet=show_tearsheet,  # Must be True to generate tearsheet file
             show_progress_bar=True,
         )
     except Exception as e:
@@ -2417,7 +2452,7 @@ def validate_only(args):
         print("")
 
         # Create table with only key columns
-        headers = ["Symbol", "Strategy ID", "Session", "Qty", "Params", "Type", "Direction"]
+        headers = ["Symbol", "Strategy ID", "Session", "Qty", "Params", "MinBars", "Type", "Direction"]
         rows = []
         for _, row in summary_df.iterrows():
             rows.append(
@@ -2427,6 +2462,7 @@ def validate_only(args):
                     str(row["sessions"]),
                     str(row["qty"]),
                     str(row["params"]),
+                    str(row.get("min_bars", 70)),
                     str(row.get("type", "unknown")),
                     str(row.get("direction", "n/a")),
                 ]
@@ -2497,8 +2533,8 @@ def main():
     parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        default="INFO",
-        help="Logging level (default: INFO)",
+        default="WARNING",
+        help="Logging level (default: WARNING)",
     )
 
     args = parser.parse_args()

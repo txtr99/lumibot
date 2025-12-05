@@ -3,6 +3,7 @@ import os
 import re
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -23,6 +24,48 @@ class DataBentoAuthenticationError(RuntimeError):
     """Raised when DataBento rejects authentication credentials."""
 
     pass
+
+
+class DatabentoNativeContinuousError(RuntimeError):
+    """Raised when native continuous futures fetch fails. HARD STOP."""
+
+    pass
+
+
+# =============================================================================
+# Native Continuous Futures Configuration
+# =============================================================================
+
+
+class ContinuousRollMethod(Enum):
+    """Databento native continuous contract roll methodology.
+
+    Databento supports virtual continuous contract symbols that automatically
+    roll based on different criteria:
+    - CALENDAR (.c.0): Rolls based on expiration calendar
+    - VOLUME (.v.0): Rolls when volume shifts to next contract
+    - OPEN_INTEREST (.n.0): Rolls when open interest shifts to next contract
+    """
+
+    CALENDAR = "c"  # .c.0 - Front month by expiration calendar
+    VOLUME = "v"  # .v.0 - Front month by volume
+    OPEN_INTEREST = "n"  # .n.0 - Front month by open interest
+
+
+# Configure which symbols use native continuous and their roll method.
+# Symbols not in this dict will fall back to manual contract stitching.
+# NOTE: Requires stype_in="continuous" when calling Databento API
+NATIVE_CONTINUOUS_CONFIG: Dict[str, ContinuousRollMethod] = {
+    # Metals - use open interest (more accurate for these markets)
+    "GC": ContinuousRollMethod.OPEN_INTEREST,
+    "MGC": ContinuousRollMethod.OPEN_INTEREST,
+    "SI": ContinuousRollMethod.OPEN_INTEREST,
+    # Index futures - use calendar (standard CME roll schedule)
+    "ES": ContinuousRollMethod.CALENDAR,
+    "MES": ContinuousRollMethod.CALENDAR,
+    "NQ": ContinuousRollMethod.CALENDAR,
+    "MNQ": ContinuousRollMethod.CALENDAR,
+}
 
 
 # DataBento imports (will be installed as dependency)
@@ -544,17 +587,80 @@ def _determine_databento_schema(timestep: str) -> str:
     return schema_mapping.get(timestep.lower(), "ohlcv-1m")
 
 
+# =============================================================================
+# Native Continuous Futures Helper Functions
+# =============================================================================
+
+
+def get_continuous_config(symbol: str) -> Optional[ContinuousRollMethod]:
+    """Get native continuous roll method for a symbol.
+
+    Parameters
+    ----------
+    symbol : str
+        Futures root symbol (e.g., "GC", "ES", "MGC")
+
+    Returns
+    -------
+    ContinuousRollMethod or None
+        The configured roll method if symbol uses native continuous,
+        None if symbol should use manual contract stitching.
+    """
+    return NATIVE_CONTINUOUS_CONFIG.get(symbol.upper())
+
+
+def build_native_continuous_symbol(symbol: str, roll_method: ContinuousRollMethod) -> str:
+    """Build Databento native continuous contract symbol.
+
+    Parameters
+    ----------
+    symbol : str
+        Futures root symbol (e.g., "GC", "ES")
+    roll_method : ContinuousRollMethod
+        The roll methodology to use
+
+    Returns
+    -------
+    str
+        Databento continuous symbol (e.g., "GC.n.0", "ES.c.0")
+    """
+    return f"{symbol.upper()}.{roll_method.value}.0"
+
+
 def _build_cache_filename(
     asset: Asset,
     start: datetime,
     end: datetime,
     timestep: str,
     symbol_override: Optional[str] = None,
+    roll_method_tag: Optional[str] = None,
 ) -> Path:
-    """Build a cache filename for the given parameters."""
+    """Build a cache filename for the given parameters.
+
+    Parameters
+    ----------
+    asset : Asset
+        The asset being cached
+    start : datetime
+        Start of date range
+    end : datetime
+        End of date range
+    timestep : str
+        Data timestep (e.g., "minute", "1m")
+    symbol_override : str, optional
+        Override the asset symbol in the filename
+    roll_method_tag : str, optional
+        Roll method tag for native continuous (e.g., "n", "c", "v").
+        When provided, creates filename like "MGC_roll-n_1m_..."
+        When None, uses original format like "MGCZ5_1m_..."
+    """
     symbol = symbol_override or asset.symbol
     if symbol_override is None and asset.expiration:
         symbol += f"_{asset.expiration.strftime('%Y%m%d')}"
+
+    # Add roll method tag for native continuous cache isolation
+    if roll_method_tag:
+        symbol = f"{symbol}_roll-{roll_method_tag}"
 
     start_dt = start if isinstance(start, datetime) else datetime.combine(start, datetime.min.time())
     end_dt = end if isinstance(end, datetime) else datetime.combine(end, datetime.min.time())
@@ -838,6 +944,142 @@ def _fetch_and_update_futures_multiplier(
         logger.error(f"[MULTIPLIER] ✗ Failed to get definition from DataBento for {resolved_symbol}")
 
 
+# =============================================================================
+# Native Continuous Futures Data Fetching
+# =============================================================================
+
+
+def _fetch_native_continuous_data(
+    api_key: str,
+    asset: Asset,
+    roll_asset: Asset,
+    start: datetime,
+    end: datetime,
+    timestep: str,
+    dataset: str,
+    schema: str,
+    continuous_config: ContinuousRollMethod,
+    force_cache_update: bool = False,
+    reference_date: Optional[datetime] = None,
+    **kwargs,
+) -> pd.DataFrame:
+    """Fetch data using Databento native continuous contract symbols.
+
+    Uses virtual continuous symbols like "GC.n.0" (open interest) or "ES.c.0"
+    (calendar) for a single API call instead of stitching multiple contracts.
+
+    Parameters
+    ----------
+    api_key : str
+        Databento API key
+    asset : Asset
+        Original asset (for multiplier update)
+    roll_asset : Asset
+        Asset with CONT_FUTURE type for symbol resolution
+    start : datetime
+        Start of date range
+    end : datetime
+        End of date range
+    timestep : str
+        Data timestep
+    dataset : str
+        Databento dataset (e.g., "GLBX.MDP3")
+    schema : str
+        Databento schema (e.g., "ohlcv-1m")
+    continuous_config : ContinuousRollMethod
+        Roll methodology to use
+    force_cache_update : bool
+        Force fresh fetch ignoring cache
+    reference_date : datetime, optional
+        Reference date for multiplier lookup
+
+    Returns
+    -------
+    pd.DataFrame
+        OHLCV data with datetime index
+
+    Raises
+    ------
+    DatabentoNativeContinuousError
+        HARD STOP if symbol not recognized or no data returned
+    """
+    continuous_symbol = build_native_continuous_symbol(roll_asset.symbol, continuous_config)
+    roll_method_tag = continuous_config.value
+
+    logger.info(
+        f"[NATIVE_CONTINUOUS] Symbol: {continuous_symbol}, " f"Range: {start} to {end}, Roll: {continuous_config.name}"
+    )
+
+    # Step 1: Check cache first
+    cache_path = _build_cache_filename(
+        asset,
+        start,
+        end,
+        timestep,
+        symbol_override=roll_asset.symbol,
+        roll_method_tag=roll_method_tag,
+    )
+
+    if not force_cache_update:
+        cached_df = _load_cache(cache_path)
+        if cached_df is not None and not cached_df.empty:
+            logger.info(f"[NATIVE_CONTINUOUS] Cache hit: {len(cached_df)} rows from {cache_path.name}")
+            return cached_df
+
+    # Step 2: Fetch multiplier using REAL contract (not virtual continuous symbol)
+    # Native continuous symbols like "GC.n.0" don't work with definition schema
+    client = DataBentoClient(api_key=api_key)
+    front_contract = futures_roll.resolve_symbol_for_datetime(roll_asset, reference_date or start, year_digits=1)
+    try:
+        _fetch_and_update_futures_multiplier(
+            client=client,
+            asset=asset,
+            resolved_symbol=front_contract,
+            dataset=dataset,
+            reference_date=reference_date or start,
+        )
+    except Exception as exc:
+        logger.warning(f"[NATIVE_CONTINUOUS] Multiplier fetch failed (continuing): {exc}")
+
+    # Step 3: Fetch data using native continuous symbol
+    start_naive = start.replace(tzinfo=None) if start.tzinfo else start
+    end_naive = end.replace(tzinfo=None) if end.tzinfo else end
+
+    try:
+        logger.info(f"[NATIVE_CONTINUOUS] Fetching {continuous_symbol} from Databento API...")
+        df_raw = client.get_historical_data(
+            dataset=dataset,
+            symbols=continuous_symbol,
+            schema=schema,
+            start=start_naive,
+            end=end_naive,
+            stype_in="continuous",  # CRITICAL: Tell Databento we're using continuous symbology
+            **kwargs,
+        )
+    except Exception as e:
+        error_str = str(e).lower()
+        if "symbology_invalid_request" in error_str or "none of the symbols" in error_str:
+            raise DatabentoNativeContinuousError(
+                f"HARD STOP: Databento doesn't recognize '{continuous_symbol}'. "
+                f"Check if {roll_asset.symbol} supports native continuous. Error: {e}"
+            ) from e
+        raise
+
+    # Step 4: HARD STOP on empty data
+    if df_raw is None or df_raw.empty:
+        raise DatabentoNativeContinuousError(
+            f"HARD STOP: No data returned for '{continuous_symbol}' "
+            f"between {start} and {end}. Verify date range has data."
+        )
+
+    # Step 5: Normalize and cache
+    df_normalized = _normalize_databento_dataframe(df_raw)
+    _save_cache(df_normalized, cache_path)
+
+    logger.info(f"[NATIVE_CONTINUOUS] SUCCESS: {len(df_normalized)} rows for {continuous_symbol}")
+    return df_normalized
+
+
 def get_price_data_from_databento(
     api_key: str,
     asset: Asset,
@@ -864,6 +1106,32 @@ def get_price_data_from_databento(
     if asset.asset_type == Asset.AssetType.FUTURE and not asset.expiration:
         roll_asset = Asset(asset.symbol, Asset.AssetType.CONT_FUTURE)
 
+    # ========== Native Continuous Branch ==========
+    # Check if this symbol is configured for native continuous contracts
+    continuous_config = get_continuous_config(roll_asset.symbol)
+
+    if continuous_config is not None and roll_asset.asset_type == Asset.AssetType.CONT_FUTURE:
+        logger.info(
+            f"[NATIVE_CONTINUOUS] Using native continuous for {roll_asset.symbol} "
+            f"with roll method: {continuous_config.name}"
+        )
+        return _fetch_native_continuous_data(
+            api_key=api_key,
+            asset=asset,
+            roll_asset=roll_asset,
+            start=start,
+            end=end,
+            timestep=timestep,
+            dataset=dataset,
+            schema=schema,
+            continuous_config=continuous_config,
+            force_cache_update=force_cache_update,
+            reference_date=reference_date,
+            **kwargs,
+        )
+    # ========== End Native Continuous Branch ==========
+
+    # Fall through to manual contract stitching for symbols not configured
     if roll_asset.asset_type == Asset.AssetType.CONT_FUTURE:
         schedule_start = start
         symbols = futures_roll.resolve_symbols_for_range(

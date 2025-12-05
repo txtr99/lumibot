@@ -870,6 +870,26 @@ class PortfolioManager:
             exit_cfg = config.get("exit_config", {})
             row["max_bars"] = exit_cfg.get("max_bars_in_trade") or config["params"].get("max_bars")
 
+            # Calculate min_bars_required from indicator params
+            # Mirrors logic in multi_strategy_executor_enhanced.py
+            p = config["params"]
+            indicator_periods = []
+            for key, value in p.items():
+                # Check params that represent indicator periods/lengths
+                if any(suffix in key.lower() for suffix in ["_length", "_period", "lookback"]):
+                    try:
+                        indicator_periods.append(int(value))
+                    except (ValueError, TypeError):
+                        pass
+                # Also check common param names without suffixes
+                if key.lower() in ["sma_fast", "sma_slow", "ema_fast", "ema_slow", "ema_medium"]:
+                    try:
+                        indicator_periods.append(int(value))
+                    except (ValueError, TypeError):
+                        pass
+            max_period = max(indicator_periods) if indicator_periods else 20
+            row["min_bars"] = max_period + 50
+
             data.append(row)
 
         df = pd.DataFrame(data)

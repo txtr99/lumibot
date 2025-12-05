@@ -17,6 +17,14 @@ from lumibot import LUMIBOT_CACHE_FOLDER
 from lumibot.entities import Asset
 from lumibot.tools import futures_roll
 
+# Import shared native continuous config from pandas helper
+from lumibot.tools.databento_helper import (
+    ContinuousRollMethod,
+    DatabentoNativeContinuousError,
+    build_native_continuous_symbol,
+    get_continuous_config,
+)
+
 # Set up module-specific logger
 from lumibot.tools.lumibot_logger import get_logger
 
@@ -567,11 +575,34 @@ def _build_cache_filename(
     end: datetime,
     timestep: str,
     symbol_override: Optional[str] = None,
+    roll_method_tag: Optional[str] = None,
 ) -> Path:
-    """Build a cache filename for the given parameters."""
+    """Build a cache filename for the given parameters.
+
+    Parameters
+    ----------
+    asset : Asset
+        The asset being cached
+    start : datetime
+        Start of date range
+    end : datetime
+        End of date range
+    timestep : str
+        Data timestep (e.g., "minute", "1m")
+    symbol_override : str, optional
+        Override the asset symbol in the filename
+    roll_method_tag : str, optional
+        Roll method tag for native continuous (e.g., "n", "c", "v").
+        When provided, creates filename like "MGC_roll-n_1m_..."
+        When None, uses original format like "MGCZ5_1m_..."
+    """
     symbol = symbol_override or asset.symbol
     if symbol_override is None and asset.expiration:
         symbol += f"_{asset.expiration.strftime('%Y%m%d')}"
+
+    # Add roll method tag for native continuous cache isolation
+    if roll_method_tag:
+        symbol = f"{symbol}_roll-{roll_method_tag}"
 
     start_dt = start if isinstance(start, datetime) else datetime.combine(start, datetime.min.time())
     end_dt = end if isinstance(end, datetime) else datetime.combine(end, datetime.min.time())
@@ -930,6 +961,116 @@ def _fetch_and_update_futures_multiplier(
         logger.error(f"[MULTIPLIER] ✗ Failed to get definition from DataBento for {resolved_symbol}")
 
 
+# =============================================================================
+# Native Continuous Futures Data Fetching (Polars Version)
+# =============================================================================
+
+
+def _fetch_native_continuous_data(
+    api_key: str,
+    asset: Asset,
+    roll_asset: Asset,
+    start: datetime,
+    end: datetime,
+    timestep: str,
+    dataset: str,
+    schema: str,
+    continuous_config: ContinuousRollMethod,
+    force_cache_update: bool = False,
+    reference_date: Optional[datetime] = None,
+    return_polars: bool = True,
+    **kwargs,
+) -> Union[pd.DataFrame, pl.DataFrame]:
+    """Fetch data using Databento native continuous contract symbols (Polars version).
+
+    Uses virtual continuous symbols like "GC.n.0" (open interest) or "ES.c.0"
+    (calendar) for a single API call instead of stitching multiple contracts.
+
+    HARD STOPS:
+    - Raises DatabentoNativeContinuousError if symbol not recognized
+    - Raises DatabentoNativeContinuousError if no data returned
+    """
+    continuous_symbol = build_native_continuous_symbol(roll_asset.symbol, continuous_config)
+    roll_method_tag = continuous_config.value
+
+    logger.info(
+        f"[NATIVE_CONTINUOUS] Symbol: {continuous_symbol}, " f"Range: {start} to {end}, Roll: {continuous_config.name}"
+    )
+
+    # Step 1: Check cache first
+    cache_path = _build_cache_filename(
+        asset,
+        start,
+        end,
+        timestep,
+        symbol_override=roll_asset.symbol,
+        roll_method_tag=roll_method_tag,
+    )
+
+    if not force_cache_update:
+        cached_df = _load_cache(cache_path)
+        if cached_df is not None and not cached_df.empty:
+            logger.info(f"[NATIVE_CONTINUOUS] Cache hit: {len(cached_df)} rows from {cache_path.name}")
+            if return_polars:
+                return pl.from_pandas(cached_df)
+            return cached_df
+
+    # Step 2: Fetch multiplier using REAL contract (not virtual continuous symbol)
+    client = DataBentoClient(api_key=api_key)
+    front_contract = futures_roll.resolve_symbol_for_datetime(roll_asset, reference_date or start, year_digits=1)
+    try:
+        _fetch_and_update_futures_multiplier(
+            client=client,
+            asset=asset,
+            resolved_symbol=front_contract,
+            dataset=dataset,
+            reference_date=reference_date or start,
+        )
+    except Exception as exc:
+        logger.warning(f"[NATIVE_CONTINUOUS] Multiplier fetch failed (continuing): {exc}")
+
+    # Step 3: Fetch data using native continuous symbol
+    start_naive = start.replace(tzinfo=None) if start.tzinfo else start
+    end_naive = end.replace(tzinfo=None) if end.tzinfo else end
+
+    try:
+        logger.info(f"[NATIVE_CONTINUOUS] Fetching {continuous_symbol} from Databento API...")
+        df_raw = client.get_historical_data(
+            dataset=dataset,
+            symbols=continuous_symbol,
+            schema=schema,
+            start=start_naive,
+            end=end_naive,
+            stype_in="continuous",  # CRITICAL: Tell Databento we're using continuous symbology
+            **kwargs,
+        )
+    except Exception as e:
+        error_str = str(e).lower()
+        if "symbology_invalid_request" in error_str or "none of the symbols" in error_str:
+            raise DatabentoNativeContinuousError(
+                f"HARD STOP: Databento doesn't recognize '{continuous_symbol}'. "
+                f"Check if {roll_asset.symbol} supports native continuous. Error: {e}"
+            ) from e
+        raise
+
+    # Step 4: HARD STOP on empty data
+    if df_raw is None or df_raw.empty:
+        raise DatabentoNativeContinuousError(
+            f"HARD STOP: No data returned for '{continuous_symbol}' "
+            f"between {start} and {end}. Verify date range has data."
+        )
+
+    # Step 5: Normalize and cache
+    df_normalized = _normalize_databento_dataframe(df_raw)
+    _save_cache(df_normalized, cache_path)
+
+    logger.info(f"[NATIVE_CONTINUOUS] SUCCESS: {len(df_normalized)} rows for {continuous_symbol}")
+
+    if return_polars:
+        return pl.from_pandas(df_normalized)
+    return df_normalized
+
+
 def get_price_data_from_databento(
     api_key: str,
     asset: Asset,
@@ -962,6 +1103,33 @@ def get_price_data_from_databento(
     if asset.asset_type == Asset.AssetType.FUTURE and not asset.expiration:
         roll_asset = Asset(asset.symbol, Asset.AssetType.CONT_FUTURE)
 
+    # ========== Native Continuous Branch ==========
+    # Check if this symbol is configured for native continuous contracts
+    continuous_config = get_continuous_config(roll_asset.symbol)
+
+    if continuous_config is not None and roll_asset.asset_type == Asset.AssetType.CONT_FUTURE:
+        logger.info(
+            f"[NATIVE_CONTINUOUS] Using native continuous for {roll_asset.symbol} "
+            f"with roll method: {continuous_config.name}"
+        )
+        return _fetch_native_continuous_data(
+            api_key=api_key,
+            asset=asset,
+            roll_asset=roll_asset,
+            start=start,
+            end=end,
+            timestep=timestep,
+            dataset=dataset,
+            schema=schema,
+            continuous_config=continuous_config,
+            force_cache_update=force_cache_update,
+            reference_date=reference_date,
+            return_polars=return_polars,
+            **kwargs,
+        )
+    # ========== End Native Continuous Branch ==========
+
+    # Fall through to manual contract stitching for symbols not configured
     if roll_asset.asset_type == Asset.AssetType.CONT_FUTURE:
         schedule_start = start
         symbols = futures_roll.resolve_symbols_for_range(

@@ -588,7 +588,9 @@ class StrategyExecutor(Thread):
             result = self.strategy.trace_stats(context, snapshot_before)
 
         result["datetime"] = self.strategy.get_datetime()
-        result["portfolio_value"] = self.strategy.portfolio_value  # Fast lookup for portfolio value
+        # Use trace_stats return value if provided, otherwise fall back to broker value
+        if "portfolio_value" not in result:
+            result["portfolio_value"] = self.strategy.portfolio_value
         result["cash"] = self.strategy.cash
 
         # Add positions column

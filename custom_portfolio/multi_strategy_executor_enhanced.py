@@ -454,7 +454,7 @@ class MultiStrategyExecutorEnhanced:
             return
 
         tail = df.tail(60)
-        self.logger.info(f"[OHLCV-DEBUG] {source_name}/{symbol}: {len(tail)} bars")
+        self.logger.info(f"[OHLCV-DEBUG] {source_name}/{symbol}: {len(df)} total bars (showing last {len(tail)})")
         if len(tail) > 0:
             first_idx = tail.index[0]
             last_idx = tail.index[-1]
@@ -836,6 +836,25 @@ class MultiStrategyExecutorEnhanced:
                 min_required = strategy_state.min_bars_required
                 if len(df) < min_required:
                     strategy_state.data_status = "ERR"
+                    # HARD STOP: Insufficient bars is a critical data issue
+                    error_msg = (
+                        f"\n{'='*70}\n"
+                        f"HARD STOP: INSUFFICIENT BARS FOR STRATEGY\n"
+                        f"{'='*70}\n"
+                        f"Strategy:     {strategy_state.strategy_id}\n"
+                        f"Symbol:       {strategy_state.symbol}\n"
+                        f"Bars received: {len(df)}\n"
+                        f"Bars required: {min_required}\n"
+                        f"Deficit:      {min_required - len(df)} bars\n"
+                        f"Current time: {current_time}\n"
+                        f"Data range:   {df.index[0]} to {df.index[-1]}\n"
+                        f"{'='*70}\n"
+                        f"This indicates a data fetch or lookback configuration issue.\n"
+                        f"Check: max_lookback setting, data source availability, cache integrity.\n"
+                        f"{'='*70}\n"
+                    )
+                    self.logger.error(error_msg)
+                    raise RuntimeError(error_msg)
                 else:
                     strategy_state.data_status = "ok"
 
@@ -1026,24 +1045,22 @@ class MultiStrategyExecutorEnhanced:
             for strategy_state in self.strategies:
                 pos = strategy_state.tracker.get_position(strategy_state.symbol)
                 if pos and pos.quantity != 0 and strategy_state.entry_price is not None:
-                    # Get current price from cached data
+                    # Get current price from cached data filtered to current_time (prevents lookahead)
                     try:
-                        market_data = self.shared_data.get_cached_data(
-                            strategy_state.symbol, self.max_lookback, self.timestep
+                        df = self.shared_data.get_data_at_time(
+                            strategy_state.symbol, current_time, self.max_lookback, self.timestep
                         )
-                        if market_data is not None:
-                            df = market_data.df if hasattr(market_data, "df") else market_data
-                            if len(df) > 0:
-                                current_price = df["close"].iloc[-1]
-                                multiplier = 1.0
-                                try:
-                                    from custom_portfolio.data.futures_metadata import get_multiplier
+                        if df is not None and len(df) > 0:
+                            current_price = df["close"].iloc[-1]
+                            multiplier = 1.0
+                            try:
+                                from custom_portfolio.data.futures_metadata import get_multiplier
 
-                                    multiplier = get_multiplier(strategy_state.symbol)
-                                except Exception:
-                                    pass
-                                unrealized = (current_price - strategy_state.entry_price) * pos.quantity * multiplier
-                                total_unrealized_pnl += unrealized
+                                multiplier = get_multiplier(strategy_state.symbol)
+                            except Exception:
+                                pass
+                            unrealized = (current_price - strategy_state.entry_price) * pos.quantity * multiplier
+                            total_unrealized_pnl += unrealized
                     except Exception as e:
                         self.logger.debug(f"Error calculating unrealized P&L for {strategy_state.strategy_id}: {e}")
 
@@ -1381,30 +1398,26 @@ class MultiStrategyExecutorEnhanced:
                     self.rate_limiter.mark_order_submitted()
 
                     # Update virtual position immediately (assume market orders fill)
-                    # Get current price from cached data (use shared lookback)
-                    market_data = self.shared_data.get_cached_data(
-                        strategy_state.symbol, self.max_lookback, self.timestep
+                    # Get current price from cached data filtered to current_time (prevents lookahead)
+                    df = self.shared_data.get_data_at_time(
+                        strategy_state.symbol, current_time, self.max_lookback, self.timestep
                     )
 
-                    if market_data is not None:
-                        if hasattr(market_data, "df"):
-                            df = market_data.df
-                        else:
-                            df = market_data
+                    if df is None:
+                        self.logger.warning(
+                            f"No market data frame for {strategy_state.strategy_id}; skipping fill update."
+                        )
+                        continue
 
-                        if df is None:
-                            self.logger.warning(
-                                f"No market data frame for {strategy_state.strategy_id}; skipping fill update."
-                            )
-                            continue
+                    if len(df) == 0:
+                        self.logger.warning(
+                            f"Empty market data when executing order for {strategy_state.strategy_id}; "
+                            f"skipping fill update."
+                        )
+                        continue
 
-                        if len(df) == 0:
-                            self.logger.warning(
-                                f"Empty market data when executing order for {strategy_state.strategy_id}; "
-                                f"skipping fill update."
-                            )
-                            continue
-
+                    # df is already filtered to current_time, so iloc[-1] is safe
+                    if True:  # Preserve indentation for following code
                         # Pick price at or before current_time (not end-of-period) to avoid future-looking fills
                         bar_time = None
                         fill_price = None
@@ -1433,7 +1446,7 @@ class MultiStrategyExecutorEnhanced:
                             fill_price = float(fill_override)
                             bar_time = df.index[-1] if len(df.index) > 0 else current_time
                         if fill_price is None:
-                            # Fallback: use last bar in the frame
+                            # Fallback: use last bar in filtered frame (safe - no lookahead)
                             fill_price = float(df["close"].iloc[-1])
                             bar_time = df.index[-1] if len(df.index) > 0 else current_time
                         current_price = fill_price
@@ -1568,7 +1581,7 @@ class MultiStrategyExecutorEnhanced:
                                     "timestamp": bar_time,
                                     "symbol": strategy_state.symbol,
                                     "position_qty": pos_qty,
-                                    "notional_exposure": pos_qty * last_price,
+                                    "notional_exposure": pos_qty,  # Contract count (simplified from dollar value)
                                     "last_price": last_price,
                                     "entry_price": entry_price,
                                     "bars_in_trade": strategy_state.bars_in_trade,

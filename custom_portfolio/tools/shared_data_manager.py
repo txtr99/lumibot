@@ -460,6 +460,62 @@ class SharedDataManager:
 
             return self.cache.get(cache_key)
 
+    def get_data_at_time(self, symbol: str, current_time, length: int, timestep: str):
+        """
+        Retrieve cached data filtered to a specific point in time.
+
+        This method prevents lookahead bias by only returning data up to
+        and including `current_time`. Used for backtest equity calculations
+        and order fills where using future data would be invalid.
+
+        Args:
+            symbol: Asset symbol
+            current_time: The backtest's current simulation time (datetime)
+            length: Number of bars requested
+            timestep: Timestep string
+
+        Returns:
+            DataFrame with data filtered to current_time, or None if no data
+
+        Example:
+            >>> # Get ES data as of 10:30 AM (no future bars)
+            >>> df = manager.get_data_at_time('ES', current_time, 100, '1M')
+            >>> if df is not None:
+            >>>     current_price = df['close'].iloc[-1]  # Safe - last bar is <= current_time
+        """
+        import pandas as pd
+
+        # Get the full cached data
+        full_data = self.get_cached_data(symbol, length, timestep)
+        if full_data is None:
+            return None
+
+        # Get the dataframe
+        df = full_data.df if hasattr(full_data, "df") else full_data
+        if df is None or len(df) == 0:
+            return None
+
+        # Normalize current_time to pandas Timestamp for comparison
+        ct = pd.Timestamp(current_time)
+
+        # Handle timezone alignment between current_time and dataframe index
+        idx = df.index
+        if idx.tz is not None and ct.tzinfo is None:
+            # DataFrame has tz, current_time is naive -> localize current_time
+            ct = ct.tz_localize(idx.tz)
+        elif idx.tz is None and ct.tzinfo is not None:
+            # DataFrame is naive, current_time has tz -> convert to naive
+            ct = ct.tz_convert(None)
+
+        # Filter to only data at or before current_time
+        filtered_df = df[df.index <= ct]
+
+        if len(filtered_df) == 0:
+            self.logger.debug(f"[SDM] get_data_at_time({symbol}, {current_time}): no data before current_time")
+            return None
+
+        return filtered_df
+
     def invalidate_cache(self, symbol: str = None, length: int = None, timestep: str = None) -> None:
         """
         Invalidate cached data for a specific symbol or all data.
