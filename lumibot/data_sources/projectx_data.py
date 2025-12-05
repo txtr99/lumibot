@@ -228,7 +228,12 @@ class ProjectXData(DataSource):
                 self.logger.error(f"Unsupported timespan: {timestep}")
                 return None
 
-            end_datetime = datetime.now().astimezone(LUMIBOT_DEFAULT_PYTZ)
+            # ProjectX historical API has T+1 delay - today's data isn't available.
+            # End at yesterday's close (23:59:59) instead of now.
+            now = datetime.now().astimezone(LUMIBOT_DEFAULT_PYTZ)
+            yesterday = now - timedelta(days=1)
+            end_datetime = yesterday.replace(hour=23, minute=59, second=59, microsecond=999999)
+
             if timeshift:
                 if timestep == "minute":
                     end_datetime -= timedelta(minutes=timeshift)
@@ -267,9 +272,7 @@ class ProjectXData(DataSource):
                 live=False,
                 is_est=True,
             )
-
             if df.empty:
-                self.logger.warning(f"No data returned for {asset.symbol}")
                 return None
 
             if len(df) > length:
@@ -336,7 +339,7 @@ class ProjectXData(DataSource):
                 self.logger.debug(f"Datetime normalization debug failed for {asset.symbol}: {log_exc}")
             return Bars(df=df, source=self.SOURCE, asset=asset, raw=df.to_dict())
         except Exception as e:
-            self.logger.error(f"Error fetching bars for {getattr(asset, 'symbol', asset)}: {e}")
+            self.logger.error(f"Failed to fetch bars for {asset.symbol}: {e}")
             return None
 
     def get_yesterday_dividend(self, asset: Asset) -> float:
@@ -375,11 +378,9 @@ class ProjectXData(DataSource):
         """
         try:
             bars = self._fetch_bars(asset=asset, length=length, timestep=timestep, timeshift=timeshift)
-
             return bars
-
         except Exception as e:
-            self.logger.error(f"Error getting historical prices for {asset.symbol}: {e}")
+            self.logger.error(f"Failed to get historical prices for {asset.symbol}: {e}")
             return None
 
     def get_chains(self, asset: Asset) -> Dict:

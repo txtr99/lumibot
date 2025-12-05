@@ -30,6 +30,7 @@ STRATEGY_CONFIG = {
         "pt_mult": 16.0,
         "sl_mult": 1.9,
     },
+    "time_exit": {"max_bars": 300},
     "allowed_sessions": ["24/7"],
     "metadata": {
         "strategy_type": "trend_following",
@@ -120,3 +121,31 @@ def generate_signal(state, df) -> str:
     if go_long(state, df):
         return "BUY"
     return "HOLD"
+
+
+def get_signal_visibility(state, df):
+    """Return list of (label, is_true) tuples for live status display."""
+    if len(df) < 4:
+        return [("S1>S2", False), ("Cross", False), ("EWC<L", False)]
+
+    indicators = populate_indicators(df, state.params)
+    macd1_signal = indicators.get("macd1_signal")
+    macd2_signal = indicators.get("macd2_signal")
+    ema_wc = indicators.get("ema_wc")
+    ema_low = indicators.get("ema_low")
+
+    if any(x is None for x in [macd1_signal, macd2_signal, ema_wc, ema_low]):
+        return [("S1>S2", False), ("Cross", False), ("EWC<L", False)]
+
+    signal1_above = macd1_signal.iloc[-2] > macd2_signal.iloc[-2] if len(macd1_signal) > 1 else False
+    ewc_below_low = ema_wc.iloc[-2] < ema_low.iloc[-2] if len(ema_wc) > 1 else False
+
+    crossed = False
+    if len(macd1_signal) >= 3 and len(macd2_signal) >= 3:
+        crossed = (macd1_signal.iloc[-3] < macd2_signal.iloc[-3]) and (macd1_signal.iloc[-2] > macd2_signal.iloc[-2])
+
+    return [
+        ("S1>S2", signal1_above),
+        ("Cross", crossed),
+        ("EWC<L", ewc_below_low),
+    ]

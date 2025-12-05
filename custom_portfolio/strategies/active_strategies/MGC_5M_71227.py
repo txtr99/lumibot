@@ -26,6 +26,7 @@ STRATEGY_CONFIG = {
         "pt_mult": 16.0,
         "sl_mult": 1.8,
     },
+    "time_exit": {"max_bars": 250},
     "allowed_sessions": ["24/7"],
     "metadata": {
         "strategy_type": "trend_following",
@@ -106,3 +107,33 @@ def generate_signal(state, df) -> str:
     if go_long(state, df):
         return "BUY"
     return "HOLD"
+
+
+def get_signal_visibility(state, df):
+    """Return list of (label, is_true) tuples for live status display."""
+    if len(df) < 4:
+        return [("RH>RC", False), ("RSIx", False), ("EMAx", False)]
+
+    indicators = populate_indicators(df, state.params)
+    rsi_high = indicators.get("rsi_high")
+    rsi_close = indicators.get("rsi_close")
+    ema_open = indicators.get("ema_open")
+
+    if any(x is None for x in [rsi_high, rsi_close, ema_open]):
+        return [("RH>RC", False), ("RSIx", False), ("EMAx", False)]
+
+    rh_above_rc = rsi_high.iloc[-2] > rsi_close.iloc[-2] if len(rsi_high) > 1 else False
+
+    rsi_crossed = False
+    if len(rsi_high) >= 3 and len(rsi_close) >= 3:
+        rsi_crossed = (rsi_high.iloc[-3] < rsi_close.iloc[-3]) and (rsi_high.iloc[-2] > rsi_close.iloc[-2])
+
+    ema_crossed = False
+    if len(ema_open) >= 3:
+        ema_crossed = (ema_open.iloc[-3] < df["close"].iloc[-3]) and (ema_open.iloc[-2] > df["close"].iloc[-2])
+
+    return [
+        ("RH>RC", rh_above_rc),
+        ("RSIx", rsi_crossed),
+        ("EMAx", ema_crossed),
+    ]

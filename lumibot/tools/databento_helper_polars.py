@@ -1107,7 +1107,13 @@ def get_price_data_from_databento(
     # Check if this symbol is configured for native continuous contracts
     continuous_config = get_continuous_config(roll_asset.symbol)
 
-    if continuous_config is not None and roll_asset.asset_type == Asset.AssetType.CONT_FUTURE:
+    # Only use native continuous for BACKTEST (has reference_date)
+    # Live mode (reference_date=None) should use specific contract via TOPSTEPX_CONTRACT_OVERRIDE
+    if (
+        continuous_config is not None
+        and roll_asset.asset_type == Asset.AssetType.CONT_FUTURE
+        and reference_date is not None
+    ):
         logger.info(
             f"[NATIVE_CONTINUOUS] Using native continuous for {roll_asset.symbol} "
             f"with roll method: {continuous_config.name}"

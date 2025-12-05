@@ -28,6 +28,7 @@ STRATEGY_CONFIG = {
         "pt_mult": 9.6,
         "sl_mult": 1.9,
     },
+    "time_exit": {"max_bars": 245},
     "allowed_sessions": ["24/7"],
     "metadata": {
         "strategy_type": "mean_reversion",
@@ -106,3 +107,30 @@ def generate_signal(state, df) -> str:
     if go_long(state, df):
         return "BUY"
     return "HOLD"
+
+
+def get_signal_visibility(state, df):
+    """Return list of (label, is_true) tuples for live status display."""
+    if len(df) < 4:
+        return [("Sig<MA", False), ("SxMA", False), ("L<EMA", False)]
+
+    indicators = populate_indicators(df, state.params)
+    macd_signal = indicators.get("macd_signal")
+    macd_signal_ma = indicators.get("macd_signal_ma")
+    ema_open = indicators.get("ema_open")
+
+    if any(x is None for x in [macd_signal, macd_signal_ma, ema_open]):
+        return [("Sig<MA", False), ("SxMA", False), ("L<EMA", False)]
+
+    signal_below_ma = macd_signal.iloc[-2] < macd_signal_ma.iloc[-2] if len(macd_signal) > 1 else False
+    low_below_ema = df["low"].iloc[-2] < ema_open.iloc[-2] if len(ema_open) > 1 else False
+
+    crossed = False
+    if len(macd_signal) >= 3 and len(macd_signal_ma) >= 3:
+        crossed = (macd_signal.iloc[-3] > macd_signal_ma.iloc[-3]) and (macd_signal.iloc[-2] < macd_signal_ma.iloc[-2])
+
+    return [
+        ("Sig<MA", signal_below_ma),
+        ("SxMA", crossed),
+        ("L<EMA", low_below_ema),
+    ]

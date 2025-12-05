@@ -25,6 +25,7 @@ STRATEGY_CONFIG = {
         "pt_mult": 14.0,
         "sl_mult": 2.1,
     },
+    "time_exit": {"max_bars": 235},
     "allowed_sessions": ["24/7"],
     "metadata": {
         "strategy_type": "mean_reversion",
@@ -99,3 +100,38 @@ def generate_signal(state, df) -> str:
     if go_long(state, df):
         return "BUY"
     return "HOLD"
+
+
+def get_signal_visibility(state, df):
+    """Return list of (label, is_true) tuples for live status display."""
+    if len(df) < 15:
+        return [("RSL<TP", False), ("Cross", False), ("Count", False)]
+
+    indicators = populate_indicators(df, state.params)
+    rsi_low = indicators.get("rsi_low")
+    rsi_typical = indicators.get("rsi_typical")
+    lower_count = state.params.get("lower_count", 10)
+
+    if rsi_low is None or rsi_typical is None:
+        return [("RSL<TP", False), ("Cross", False), ("Count", False)]
+
+    rsl_below = rsi_low.iloc[-2] < rsi_typical.iloc[-2] if len(rsi_low) > 1 else False
+
+    crossed = False
+    if len(rsi_low) >= 3 and len(rsi_typical) >= 3:
+        crossed = (rsi_low.iloc[-3] < rsi_typical.iloc[-3]) and (rsi_low.iloc[-2] >= rsi_typical.iloc[-2])
+
+    # Count consecutive bars below
+    count = 0
+    if len(rsi_low) >= lower_count + 3 and len(rsi_typical) >= lower_count + 3:
+        for i in range(2, lower_count + 2):
+            if rsi_low.iloc[-i] < rsi_typical.iloc[-i]:
+                count += 1
+            else:
+                break
+
+    return [
+        ("RSL<TP", rsl_below),
+        ("Cross", crossed),
+        (f"Cnt{count}", count >= lower_count - 1),
+    ]

@@ -27,6 +27,7 @@ STRATEGY_CONFIG = {
         "pt_mult": 15.1,
         "sl_mult": 1.9,
     },
+    "time_exit": {"max_bars": 300},
     "allowed_sessions": ["24/7"],
     "metadata": {
         "strategy_type": "mean_reversion",
@@ -112,3 +113,30 @@ def generate_signal(state, df) -> str:
     if go_long(state, df):
         return "BUY"
     return "HOLD"
+
+
+def get_signal_visibility(state, df):
+    """Return list of (label, is_true) tuples for live status display."""
+    if len(df) < 4:
+        return [("RSI1>2", False), ("L<C", False), ("CxSMA", False)]
+
+    indicators = populate_indicators(df, state.params)
+    rsi1 = indicators.get("rsi1")
+    rsi2 = indicators.get("rsi2")
+    sma = indicators.get("sma")
+
+    if any(x is None for x in [rsi1, rsi2, sma]):
+        return [("RSI1>2", False), ("L<C", False), ("CxSMA", False)]
+
+    rsi1_above = rsi1.iloc[-2] > rsi2.iloc[-2] if len(rsi1) > 1 else False
+    low_below_close = df["low"].iloc[-2] < df["close"].iloc[-2]
+
+    crossed = False
+    if len(rsi1) >= 3 and len(rsi2) >= 3:
+        crossed = (rsi1.iloc[-3] < rsi2.iloc[-3]) and (rsi1.iloc[-2] > rsi2.iloc[-2])
+
+    return [
+        ("RSI1>2", rsi1_above),
+        ("L<C", low_below_close),
+        ("Cross", crossed),
+    ]

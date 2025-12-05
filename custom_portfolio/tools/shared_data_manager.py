@@ -407,7 +407,6 @@ class SharedDataManager:
                 )
                 continue
 
-            self._log_verbose(f"[SDM] No prefetched/store data for {symbol}; fetching from API")
             try:
                 asset = Asset(symbol, asset_type=asset_type)
                 data = self.data_source.get_historical_prices(asset, length, timestep)

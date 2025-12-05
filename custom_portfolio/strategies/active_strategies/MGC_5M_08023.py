@@ -22,6 +22,7 @@ STRATEGY_CONFIG = {
         "pt_mult": 13.8,
         "sl_mult": 1.8,
     },
+    "time_exit": {"max_bars": 200},
     "allowed_sessions": ["24/7"],
     "metadata": {
         "strategy_type": "trend_following",
@@ -92,3 +93,35 @@ def generate_signal(state, df) -> str:
     if go_long(state, df):
         return "BUY"
     return "HOLD"
+
+
+def get_signal_visibility(state, df):
+    """Return list of (label, is_true) tuples for live status display."""
+    if len(df) < 6:
+        return [("RSI↑", False), ("C>EMA", False), ("Rising", False)]
+
+    indicators = populate_indicators(df, state.params)
+    rsi = indicators.get("rsi")
+    ema = indicators.get("ema")
+    rising_count = state.params.get("rising_count", 3)
+
+    if rsi is None or ema is None:
+        return [("RSI↑", False), ("C>EMA", False), ("Rising", False)]
+
+    close_above_ema = df["close"].iloc[-2] > ema.iloc[-2] if len(ema) > 1 else False
+    rsi_rising = rsi.iloc[-2] > rsi.iloc[-3] if len(rsi) > 2 else False
+
+    # Check consecutive rising
+    consecutive = 0
+    if len(rsi) >= rising_count + 2:
+        for i in range(rising_count):
+            if rsi.iloc[-2 - i] > rsi.iloc[-3 - i]:
+                consecutive += 1
+            else:
+                break
+
+    return [
+        ("RSI↑", rsi_rising),
+        ("C>EMA", close_above_ema),
+        (f"Rise{consecutive}", consecutive >= rising_count),
+    ]

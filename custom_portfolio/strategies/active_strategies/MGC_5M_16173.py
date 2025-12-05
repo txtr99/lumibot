@@ -23,6 +23,7 @@ STRATEGY_CONFIG = {
         "pt_mult": 11.8,
         "sl_mult": 2.0,
     },
+    "time_exit": {"max_bars": 300},
     "allowed_sessions": ["24/7"],
     "metadata": {
         "strategy_type": "mean_reversion",
@@ -94,3 +95,29 @@ def generate_signal(state, df) -> str:
     if go_long(state, df):
         return "BUY"
     return "HOLD"
+
+
+def get_signal_visibility(state, df):
+    """Return list of (label, is_true) tuples for live status display."""
+    if len(df) < 4:
+        return [("Hist>0", False), ("Cross", False), ("C>EMA", False)]
+
+    indicators = populate_indicators(df, state.params)
+    macd_histogram = indicators.get("macd_histogram")
+    ema = indicators.get("ema")
+
+    if macd_histogram is None or ema is None:
+        return [("Hist>0", False), ("Cross", False), ("C>EMA", False)]
+
+    hist_positive = macd_histogram.iloc[-2] > 0 if len(macd_histogram) > 1 else False
+    price_above_ema = df["close"].iloc[-2] > ema.iloc[-2] if len(ema) > 1 else False
+
+    crossed = False
+    if len(macd_histogram) >= 3:
+        crossed = (macd_histogram.iloc[-3] < 0) and (macd_histogram.iloc[-2] > 0)
+
+    return [
+        ("Hist>0", hist_positive),
+        ("Cross", crossed),
+        ("C>EMA", price_above_ema),
+    ]

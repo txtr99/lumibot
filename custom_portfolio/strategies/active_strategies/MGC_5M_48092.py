@@ -30,6 +30,7 @@ STRATEGY_CONFIG = {
         "pt_mult": 15.7,
         "sl_mult": 1.7,
     },
+    "time_exit": {"max_bars": 150},
     "allowed_sessions": ["24/7"],
     "metadata": {
         "strategy_type": "mean_reversion",
@@ -111,3 +112,31 @@ def generate_signal(state, df) -> str:
     if go_long(state, df):
         return "BUY"
     return "HOLD"
+
+
+def get_signal_visibility(state, df):
+    """Return list of (label, is_true) tuples for live status display."""
+    if len(df) < 6:
+        return [("EMA↓", False), ("MxTh", False), ("M<hi", False)]
+
+    indicators = populate_indicators(df, state.params)
+    ema = indicators.get("ema")
+    macd_line = indicators.get("macd_line")
+    macd_threshold_low = state.params.get("macd_threshold_low", -0.8)
+    macd_threshold_high = state.params.get("macd_threshold_high", 0.5)
+
+    if ema is None or macd_line is None:
+        return [("EMA↓", False), ("MxTh", False), ("M<hi", False)]
+
+    ema_falling = ema.iloc[-2] < ema.iloc[-3] if len(ema) > 2 else False
+    macd_below_high = macd_line.iloc[-2] < macd_threshold_high if len(macd_line) > 1 else False
+
+    macd_crossed = False
+    if len(macd_line) >= 3:
+        macd_crossed = (macd_line.iloc[-3] < macd_threshold_low) and (macd_line.iloc[-2] > macd_threshold_low)
+
+    return [
+        ("EMA↓", ema_falling),
+        ("MxTh", macd_crossed),
+        ("M<hi", macd_below_high),
+    ]

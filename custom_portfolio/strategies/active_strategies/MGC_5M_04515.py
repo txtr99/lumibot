@@ -24,6 +24,7 @@ STRATEGY_CONFIG = {
         "pt_mult": 10.6,
         "sl_mult": 2.1,
     },
+    "time_exit": {"max_bars": 300},
     "allowed_sessions": ["24/7"],
     "metadata": {
         "strategy_type": "trend_following",
@@ -103,3 +104,31 @@ def generate_signal(state, df) -> str:
     if go_long(state, df):
         return "BUY"
     return "HOLD"
+
+
+def get_signal_visibility(state, df):
+    """Return list of (label, is_true) tuples for live status display."""
+    if len(df) < 4:
+        return [("EMA1>2", False), ("Cross", False), ("MACD+", False)]
+
+    indicators = populate_indicators(df, state.params)
+    ema1 = indicators.get("ema1")
+    ema2 = indicators.get("ema2")
+    macd_line = indicators.get("macd_line")
+    macd_signal = indicators.get("macd_signal")
+
+    if any(x is None for x in [ema1, ema2, macd_line, macd_signal]):
+        return [("EMA1>2", False), ("Cross", False), ("MACD+", False)]
+
+    ema1_above = ema1.iloc[-2] > ema2.iloc[-2] if len(ema1) > 1 else False
+    macd_bullish = macd_line.iloc[-2] > macd_signal.iloc[-2] if len(macd_line) > 1 else False
+
+    crossed = False
+    if len(ema1) >= 3 and len(ema2) >= 3:
+        crossed = (ema1.iloc[-3] < ema2.iloc[-3]) and (ema1.iloc[-2] > ema2.iloc[-2])
+
+    return [
+        ("EMA1>2", ema1_above),
+        ("Cross", crossed),
+        ("MACD+", macd_bullish),
+    ]

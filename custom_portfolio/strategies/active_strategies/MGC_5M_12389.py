@@ -23,6 +23,7 @@ STRATEGY_CONFIG = {
         "pt_mult": 14.3,
         "sl_mult": 1.8,
     },
+    "time_exit": {"max_bars": 200},
     "allowed_sessions": ["24/7"],
     "metadata": {
         "strategy_type": "trend_following",
@@ -97,3 +98,31 @@ def generate_signal(state, df) -> str:
     if go_long(state, df):
         return "BUY"
     return "HOLD"
+
+
+def get_signal_visibility(state, df):
+    """Return list of (label, is_true) tuples for live status display."""
+    if len(df) < 4:
+        return [("EMA1>2", False), ("Cross", False), ("RSI>th", False)]
+
+    indicators = populate_indicators(df, state.params)
+    ema1 = indicators.get("ema1")
+    ema2 = indicators.get("ema2")
+    rsi = indicators.get("rsi")
+    rsi_threshold = state.params.get("rsi_threshold", 45)
+
+    if any(x is None for x in [ema1, ema2, rsi]):
+        return [("EMA1>2", False), ("Cross", False), ("RSI>th", False)]
+
+    ema1_above = ema1.iloc[-2] > ema2.iloc[-2] if len(ema1) > 1 else False
+    rsi_confirmed = rsi.iloc[-2] > rsi_threshold if len(rsi) > 1 else False
+
+    crossed = False
+    if len(ema1) >= 3 and len(ema2) >= 3:
+        crossed = (ema1.iloc[-3] < ema2.iloc[-3]) and (ema1.iloc[-2] > ema2.iloc[-2])
+
+    return [
+        ("EMA1>2", ema1_above),
+        ("Cross", crossed),
+        ("RSI>th", rsi_confirmed),
+    ]
