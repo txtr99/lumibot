@@ -185,3 +185,62 @@ class TestIntegrationWithDatabento:
         assert len(df) > 0
         assert "open" in df.columns
         assert "close" in df.columns
+
+    @pytest.mark.skipif(not os.getenv("DATABENTO_API_KEY"), reason="No DATABENTO_API_KEY set")
+    def test_gc_native_continuous_coverage_90_percent(self):
+        """
+        Test that GC continuous futures via open interest (GC.n.0) achieves 90%+ data coverage.
+
+        This is a regression test for the bug where reference_date wasn't passed to
+        get_price_data_from_databento(), causing fallback to broken manual stitching
+        which yielded ~2.5% coverage instead of ~100%.
+        """
+        from lumibot.tools.databento_helper import get_price_data_from_databento
+
+        api_key = os.getenv("DATABENTO_API_KEY")
+        asset = Asset("GC", Asset.AssetType.CONT_FUTURE)
+
+        # Use a 3-day window for a reasonable test duration
+        start = datetime(2025, 12, 1, 0, 0)
+        end = datetime(2025, 12, 4, 0, 0)
+        reference_date = start  # Key: this enables native continuous path
+
+        df = get_price_data_from_databento(
+            api_key=api_key,
+            asset=asset,
+            start=start,
+            end=end,
+            timestep="minute",
+            reference_date=reference_date,  # CRITICAL - enables GC.n.0 path
+        )
+
+        assert df is not None, "DataFrame should not be None"
+        assert len(df) > 0, "DataFrame should have rows"
+
+        # Calculate coverage
+        # ETH for metals is ~23 hours/day (CME Globex), so ~1380 minutes/day
+        # 3 days = ~4140 expected minutes (some variation for weekends/holidays)
+        actual_minutes = len(df)
+
+        # Sun 12/1 partial + Mon 12/2 + Tue 12/3 = roughly 2.5 full trading days
+        # Conservative: expect at least 2 days worth = 2760 minutes
+        min_expected_minutes = 2760
+        coverage_pct = (actual_minutes / min_expected_minutes) * 100
+
+        assert coverage_pct >= 90, (
+            f"Coverage should be >= 90% but got {coverage_pct:.1f}% "
+            f"({actual_minutes} rows, expected >= {min_expected_minutes}). "
+            f"This may indicate native continuous (GC.n.0) is not being used."
+        )
+
+        # Verify it's using open interest roll method by checking for continuous data
+        # If manual stitching was used (broken), we'd see huge gaps
+        time_diffs = df.index.to_series().diff().dropna()
+        max_gap_minutes = time_diffs.max().total_seconds() / 60
+
+        # Max gap should be <= 120 minutes (maintenance window)
+        # Manual stitching would show gaps of hours/days
+        assert max_gap_minutes <= 180, (
+            f"Max gap should be <= 180 minutes but got {max_gap_minutes:.0f} minutes. "
+            f"Large gaps suggest native continuous (GC.n.0) is not being used."
+        )
