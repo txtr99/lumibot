@@ -787,6 +787,11 @@ def _deep_debug_config():
     return os.environ.get("DEEP_PORTFOLIO_DEBUG", "false").lower() == "true"
 
 
+def _debug_indicators_config():
+    """Enable per-strategy indicator debug logging (only when explicitly requested)."""
+    return os.environ.get("DEBUG_INDICATORS", "false").lower() == "true"
+
+
 def _visual_config():
     """Read visualization toggles from env with defaults of True when unset."""
     show_plot = _env_flag("SHOW_PLOT", True)
@@ -1177,8 +1182,11 @@ def run_backtest(args):
     shared_initial_capital = _capital_config()
     debug_logs = _debug_config()
     deep_portfolio_debug = _deep_debug_config()
+    debug_indicators = _debug_indicators_config()
     show_plot, show_tearsheet, show_indicators = _visual_config()
     print(f"[SETTINGS] plot={show_plot} tearsheet={show_tearsheet} indicators={show_indicators}")
+    if debug_indicators:
+        print("[SETTINGS] DEBUG_INDICATORS=true (indicator-level logging enabled)")
 
     if not start_date_str or not end_date_str:
         print(TF.error("BACKTESTING_START and BACKTESTING_END must be set in .env file"))
@@ -1301,6 +1309,7 @@ def run_backtest(args):
                 shared_initial_capital=shared_initial_capital,
                 broker_strategy_name=getattr(self, "name", "PortfolioStrategy"),
                 deep_portfolio_debug=deep_portfolio_debug,
+                debug_indicators=debug_indicators,
                 ignore_calendar=ignore_calendar,  # Controlled by ENFORCE_SESSIONS_IN_BACKTEST env var
             )
 
@@ -1659,6 +1668,7 @@ def run_live(args):
     dry_run_mode = _live_dry_run_config()
     shared_initial_capital = _capital_config()
     deep_portfolio_debug = _deep_debug_config()
+    debug_indicators = _debug_indicators_config()
 
     print("=" * 70)
     if dry_run_mode:
@@ -1853,6 +1863,7 @@ def run_live(args):
         simulate_fills=dry_run_mode,  # In live mode: dry_run_mode=True means simulate, False means real orders
         shared_initial_capital=shared_initial_capital,
         deep_portfolio_debug=deep_portfolio_debug,
+        debug_indicators=debug_indicators,
         ignore_calendar=False,  # ALWAYS enforce calendar in live mode (TopStepX compliance)
         bracket_manager=bracket_manager,  # For race-safe close pattern
         order_registry=order_registry,  # For bulletproof order tracking
@@ -2422,6 +2433,7 @@ def validate_only(args):
     simulate_fills = _simulate_fills_config()
     shared_initial_capital = _capital_config()
     deep_portfolio_debug = _deep_debug_config()
+    debug_indicators = _debug_indicators_config()
 
     # Create a minimal portfolio manager for validation
     portfolio_manager = PortfolioManager(
@@ -2435,6 +2447,7 @@ def validate_only(args):
         simulate_fills=simulate_fills,
         shared_initial_capital=shared_initial_capital,
         deep_portfolio_debug=deep_portfolio_debug,
+        debug_indicators=debug_indicators,
     )
 
     # Print validation report (includes all formatting and final status)
@@ -2538,6 +2551,11 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Auto-elevate log level when DEBUG_INDICATORS is enabled
+    if os.environ.get("DEBUG_INDICATORS", "false").lower() == "true":
+        if args.log_level == "WARNING":  # Only override if using default
+            args.log_level = "INFO"
 
     # Set up logging
     setup_logging(args.log_level)

@@ -8,6 +8,10 @@ Original logic:
 - Low < EMA(Open)
 """
 
+import logging
+
+_logger = logging.getLogger(__name__)
+
 STRATEGY_CONFIG = {
     "strategy_id": "",  # Use filename
     "symbol": "MGC",
@@ -37,7 +41,7 @@ STRATEGY_CONFIG = {
 }
 
 
-def populate_indicators(df, params):
+def populate_indicators(df, params, debug=False, strategy_id=""):
     """
     Calculate indicators for MACD signal cross below MA with EMA filter.
     """
@@ -61,6 +65,16 @@ def populate_indicators(df, params):
     # EMA of Open
     indicators["ema_open"] = ta.ema(df["open"], length=ema_period)
 
+    if debug and indicators.get("macd_signal") is not None and len(indicators["macd_signal"]) >= 3:
+        ms = indicators["macd_signal"]
+        msma = indicators.get("macd_signal_ma")
+        eo = indicators.get("ema_open")
+        _logger.info(
+            f"[INDICATOR] {strategy_id}: macd_sig={ms.iloc[-2]:.2f}, "
+            f"sig_ma={(msma.iloc[-2] if msma is not None else 0):.2f}, "
+            f"ema_o={(eo.iloc[-2] if eo is not None else 0):.2f}"
+        )
+
     return indicators
 
 
@@ -70,10 +84,12 @@ def go_long(state, df) -> bool:
     - MACD signal crosses below its MA (oversold indication)
     - Low < EMA(Open) (price pullback)
     """
+    debug = getattr(state, "debug_indicators", False)
+
     if len(df) < 4:
         return False
 
-    indicators = populate_indicators(df, state.params)
+    indicators = populate_indicators(df, state.params, debug=debug, strategy_id=state.strategy_id)
     macd_signal = indicators.get("macd_signal")
     macd_signal_ma = indicators.get("macd_signal_ma")
     ema_open = indicators.get("ema_open")
@@ -94,7 +110,15 @@ def go_long(state, df) -> bool:
     # Low < EMA(Open)
     low_below_ema = df["low"].iloc[-2] < ema_open.iloc[-2]
 
-    return macd_cross_below and low_below_ema
+    result = macd_cross_below and low_below_ema
+
+    if debug:
+        _logger.info(
+            f"[SIGNAL-CHECK] {state.strategy_id}: sig_x_ma={macd_cross_below}, "
+            f"low<ema={low_below_ema} → go_long={result}"
+        )
+
+    return result
 
 
 def go_short(state, df) -> bool:

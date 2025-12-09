@@ -124,9 +124,26 @@ BEST PRACTICES
 7. Test with sufficient historical data before live trading
 
 ================================================================================
+DEBUG LOGGING (for troubleshooting signal generation)
+================================================================================
+Enable with: DEBUG_INDICATORS=true python run_portfolio.py --mode backtest
+
+When enabled, strategies log indicator values and condition checks:
+- [INDICATOR] strategy_id: indicator_name=value, ...
+- [SIGNAL-CHECK] strategy_id: condition1=True/False, ...
+
+This is controlled by state.debug_indicators flag set by the executor.
+To add debug logging to your strategy, check getattr(state, "debug_indicators", False).
+
+================================================================================
 """
 
+import logging
+
 import pandas_ta as ta  # noqa: F401 - commonly used, import at top
+
+# Logger for debug output (controlled by DEBUG_INDICATORS env var)
+_logger = logging.getLogger(__name__)
 
 STRATEGY_CONFIG = {
     "strategy_id": "",  # Leave empty to auto-fill from filename
@@ -155,7 +172,7 @@ STRATEGY_CONFIG = {
 }
 
 
-def populate_indicators(df, params):
+def populate_indicators(df, params, debug=False, strategy_id=""):
     """
     Compute and return a dict of ALL indicators needed for entry logic.
 
@@ -168,6 +185,8 @@ def populate_indicators(df, params):
     Args:
         df: DataFrame with OHLCV data (columns: open, high, low, close, volume)
         params: Strategy parameters from STRATEGY_CONFIG["params"]
+        debug: If True, log indicator values (controlled by DEBUG_INDICATORS env var)
+        strategy_id: Strategy identifier for debug logging
 
     Returns:
         dict of indicator values
@@ -187,7 +206,7 @@ def populate_indicators(df, params):
     sma_slow = closes.rolling(sma_slow_len).mean()
     rsi = ta.rsi(closes, length=rsi_len)
 
-    return {
+    indicators = {
         # Current values
         "sma_fast": sma_fast.iloc[-1],
         "sma_slow": sma_slow.iloc[-1],
@@ -196,6 +215,15 @@ def populate_indicators(df, params):
         "rsi_prev": rsi.iloc[-2],
         "sma_fast_prev": sma_fast.iloc[-2],
     }
+
+    # Debug logging if enabled
+    if debug:
+        _logger.info(
+            f"[INDICATOR] {strategy_id}: sma_fast={indicators['sma_fast']:.4f}, "
+            f"sma_slow={indicators['sma_slow']:.4f}, rsi={indicators['rsi_current']:.2f}"
+        )
+
+    return indicators
 
 
 def go_long(state, df):
@@ -211,9 +239,17 @@ def go_long(state, df):
     - SMA(20) > SMA(50) (fast above slow - uptrend)
     - RSI(14) > 50 (momentum confirmation)
     """
-    indicators = populate_indicators(df, state.params)
+    debug = getattr(state, "debug_indicators", False)
+    indicators = populate_indicators(df, state.params, debug=debug, strategy_id=state.strategy_id)
 
-    condition = indicators["sma_fast"] > indicators["sma_slow"] and indicators["rsi_current"] > 50
+    cond_sma = indicators["sma_fast"] > indicators["sma_slow"]
+    cond_rsi = indicators["rsi_current"] > 50
+    condition = cond_sma and cond_rsi
+
+    if debug:
+        _logger.info(
+            f"[SIGNAL-CHECK] {state.strategy_id}: sma_fast>slow={cond_sma}, rsi>50={cond_rsi} → go_long={condition}"
+        )
 
     return condition
 
@@ -224,9 +260,17 @@ def go_short(state, df):
 
     For long-only strategies, simply return False.
     """
-    indicators = populate_indicators(df, state.params)
+    debug = getattr(state, "debug_indicators", False)
+    indicators = populate_indicators(df, state.params, debug=debug, strategy_id=state.strategy_id)
 
-    condition = indicators["sma_fast"] < indicators["sma_slow"] and indicators["rsi_current"] < 50
+    cond_sma = indicators["sma_fast"] < indicators["sma_slow"]
+    cond_rsi = indicators["rsi_current"] < 50
+    condition = cond_sma and cond_rsi
+
+    if debug:
+        _logger.info(
+            f"[SIGNAL-CHECK] {state.strategy_id}: sma_fast<slow={cond_sma}, rsi<50={cond_rsi} → go_short={condition}"
+        )
 
     return condition
 

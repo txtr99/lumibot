@@ -4,6 +4,11 @@ Converted from StrategyQuant X EasyLanguage
 Long-only strategy for MGC (Micro Gold Futures)
 """
 
+import logging
+
+# Logger for debug output (controlled by DEBUG_INDICATORS env var)
+_logger = logging.getLogger(__name__)
+
 STRATEGY_CONFIG = {
     "strategy_id": "",  # Use filename
     "symbol": "MGC",
@@ -32,7 +37,7 @@ STRATEGY_CONFIG = {
 }
 
 
-def populate_indicators(df, params):
+def populate_indicators(df, params, debug=False, strategy_id=""):
     """
     Calculate indicators for MACD histogram reversal.
     """
@@ -53,6 +58,15 @@ def populate_indicators(df, params):
     # EMA for trend filter
     indicators["ema"] = ta.ema(df["close"], length=ema_period)
 
+    # Debug logging if enabled
+    if debug and indicators.get("macd_histogram") is not None and len(indicators["macd_histogram"]) >= 3:
+        macd_hist = indicators["macd_histogram"]
+        ema = indicators["ema"]
+        _logger.info(
+            f"[INDICATOR] {strategy_id}: macd_hist[-2]={macd_hist.iloc[-2]:.2f}, "
+            f"ema[-2]={(ema.iloc[-2] if ema is not None else 0):.2f}"
+        )
+
     return indicators
 
 
@@ -62,10 +76,12 @@ def go_long(state, df) -> bool:
     - MACD histogram turns positive (crosses above zero)
     - Price above EMA (trend filter)
     """
+    debug = getattr(state, "debug_indicators", False)
+
     if len(df) < 4:
         return False
 
-    indicators = populate_indicators(df, state.params)
+    indicators = populate_indicators(df, state.params, debug=debug, strategy_id=state.strategy_id)
     macd_histogram = indicators.get("macd_histogram")
     ema = indicators.get("ema")
 
@@ -82,7 +98,15 @@ def go_long(state, df) -> bool:
     # Trend filter
     price_above_ema = df["close"].iloc[-2] > ema.iloc[-2]
 
-    return histogram_crossover and price_above_ema
+    result = histogram_crossover and price_above_ema
+
+    if debug:
+        _logger.info(
+            f"[SIGNAL-CHECK] {state.strategy_id}: histogram_crossover={histogram_crossover}, "
+            f"price_above_ema={price_above_ema} → go_long={result}"
+        )
+
+    return result
 
 
 def go_short(state, df) -> bool:

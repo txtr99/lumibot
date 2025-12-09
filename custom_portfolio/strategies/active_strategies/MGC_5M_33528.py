@@ -9,6 +9,11 @@ Original logic:
 - Close crosses above its SMA
 """
 
+import logging
+
+# Logger for debug output (controlled by DEBUG_INDICATORS env var)
+_logger = logging.getLogger(__name__)
+
 STRATEGY_CONFIG = {
     "strategy_id": "",  # Use filename
     "symbol": "MGC",
@@ -36,7 +41,7 @@ STRATEGY_CONFIG = {
 }
 
 
-def populate_indicators(df, params):
+def populate_indicators(df, params, debug=False, strategy_id=""):
     """
     Calculate indicators for RSI crossover with price cross MA.
     """
@@ -58,6 +63,17 @@ def populate_indicators(df, params):
     # SMA for crossover
     indicators["sma"] = ta.sma(df["close"], length=cross_ma_period)
 
+    # Debug logging if enabled
+    if debug and indicators.get("rsi1") is not None and len(indicators["rsi1"]) >= 3:
+        rsi1 = indicators["rsi1"]
+        rsi2 = indicators["rsi2"]
+        sma = indicators["sma"]
+        _logger.info(
+            f"[INDICATOR] {strategy_id}: rsi1[-2]={rsi1.iloc[-2]:.2f}, "
+            f"rsi2[-2]={(rsi2.iloc[-2] if rsi2 is not None else 0):.2f}, "
+            f"sma[-2]={(sma.iloc[-2] if sma is not None else 0):.2f}"
+        )
+
     return indicators
 
 
@@ -68,10 +84,12 @@ def go_long(state, df) -> bool:
     - Low < Close
     - Close crosses above SMA
     """
+    debug = getattr(state, "debug_indicators", False)
+
     if len(df) < 4:
         return False
 
-    indicators = populate_indicators(df, state.params)
+    indicators = populate_indicators(df, state.params, debug=debug, strategy_id=state.strategy_id)
     rsi1 = indicators.get("rsi1")
     rsi2 = indicators.get("rsi2")
     sma = indicators.get("sma")
@@ -100,7 +118,15 @@ def go_long(state, df) -> bool:
     sma_prev1 = sma.iloc[-2]
     close_cross_sma = (close_prev2 < sma_prev2) and (close_prev > sma_prev1)
 
-    return rsi_crossover and low_below_close and close_cross_sma
+    result = rsi_crossover and low_below_close and close_cross_sma
+
+    if debug:
+        _logger.info(
+            f"[SIGNAL-CHECK] {state.strategy_id}: rsi_crossover={rsi_crossover}, "
+            f"low_below_close={low_below_close}, close_cross_sma={close_cross_sma} → go_long={result}"
+        )
+
+    return result
 
 
 def go_short(state, df) -> bool:

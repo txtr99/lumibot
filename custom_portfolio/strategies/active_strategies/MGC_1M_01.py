@@ -16,7 +16,12 @@ Parameters scaled from 5M to 1M:
 - Max Bars: 180 -> 900
 """
 
+import logging
+
 import pandas_ta as ta
+
+# Logger for debug output (controlled by DEBUG_INDICATORS env var)
+_logger = logging.getLogger(__name__)
 
 STRATEGY_CONFIG = {
     "strategy_id": "",  # Auto-fill from filename
@@ -42,7 +47,7 @@ STRATEGY_CONFIG = {
 }
 
 
-def populate_indicators(df, params):
+def populate_indicators(df, params, debug=False, strategy_id=""):
     """
     Calculate MACD on median price and its moving average for cross detection.
 
@@ -71,7 +76,7 @@ def populate_indicators(df, params):
     # Calculate MA of MACD line for cross detection
     macd_ma = macd_line.rolling(cross_period).mean()
 
-    return {
+    indicators = {
         # Current bar values
         "macd": macd_line.iloc[-1],
         "macd_ma": macd_ma.iloc[-1],
@@ -82,6 +87,15 @@ def populate_indicators(df, params):
         "macd_2ago": macd_line.iloc[-3],
         "macd_ma_2ago": macd_ma.iloc[-3],
     }
+
+    # Debug logging if enabled
+    if debug:
+        _logger.info(
+            f"[INDICATOR] {strategy_id}: macd={indicators['macd']:.6f}, macd_ma={indicators['macd_ma']:.6f}, "
+            f"macd_2ago={indicators['macd_2ago']:.6f}, macd_ma_2ago={indicators['macd_ma_2ago']:.6f}"
+        )
+
+    return indicators
 
 
 def go_long(state, df):
@@ -95,7 +109,8 @@ def go_long(state, df):
     - 2 bars ago: MACD was >= MA
     - 1 bar ago: MACD dropped below MA
     """
-    indicators = populate_indicators(df, state.params)
+    debug = getattr(state, "debug_indicators", False)
+    indicators = populate_indicators(df, state.params, debug=debug, strategy_id=state.strategy_id)
 
     # Values from 2 bars ago
     macd_2ago = indicators["macd_2ago"]
@@ -106,7 +121,15 @@ def go_long(state, df):
     macd_ma_prev = indicators["macd_ma_prev"]
 
     # Cross below detection: was above or equal, now below
-    crossed_below = macd_2ago >= macd_ma_2ago and macd_prev < macd_ma_prev
+    cond_was_above = macd_2ago >= macd_ma_2ago
+    cond_now_below = macd_prev < macd_ma_prev
+    crossed_below = cond_was_above and cond_now_below
+
+    if debug:
+        _logger.info(
+            f"[SIGNAL-CHECK] {state.strategy_id}: was_above={cond_was_above}, now_below={cond_now_below} "
+            f"→ go_long={crossed_below}"
+        )
 
     return crossed_below
 

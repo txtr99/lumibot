@@ -4,6 +4,11 @@ Converted from StrategyQuant X EasyLanguage
 Long-only strategy for MGC (Micro Gold Futures)
 """
 
+import logging
+
+# Logger for debug output (controlled by DEBUG_INDICATORS env var)
+_logger = logging.getLogger(__name__)
+
 STRATEGY_CONFIG = {
     "strategy_id": "",  # Use filename
     "symbol": "MGC",
@@ -32,7 +37,7 @@ STRATEGY_CONFIG = {
 }
 
 
-def populate_indicators(df, params):
+def populate_indicators(df, params, debug=False, strategy_id=""):
     """
     Calculate indicators for EMA crossover with RSI confirmation.
     """
@@ -51,6 +56,16 @@ def populate_indicators(df, params):
     # RSI
     indicators["rsi"] = ta.rsi(df["close"], length=rsi_period)
 
+    # Debug logging if enabled
+    if debug and indicators.get("ema1") is not None and len(indicators["ema1"]) >= 3:
+        ema1 = indicators["ema1"]
+        ema2 = indicators["ema2"]
+        rsi = indicators["rsi"]
+        _logger.info(
+            f"[INDICATOR] {strategy_id}: ema1[-2]={ema1.iloc[-2]:.2f}, "
+            f"ema2[-2]={ema2.iloc[-2]:.2f}, rsi[-2]={(rsi.iloc[-2] if rsi is not None else 0):.2f}"
+        )
+
     return indicators
 
 
@@ -60,10 +75,12 @@ def go_long(state, df) -> bool:
     - Fast EMA crosses above slow EMA
     - RSI above threshold
     """
+    debug = getattr(state, "debug_indicators", False)
+
     if len(df) < 4:
         return False
 
-    indicators = populate_indicators(df, state.params)
+    indicators = populate_indicators(df, state.params, debug=debug, strategy_id=state.strategy_id)
     ema1 = indicators.get("ema1")
     ema2 = indicators.get("ema2")
     rsi = indicators.get("rsi")
@@ -85,7 +102,15 @@ def go_long(state, df) -> bool:
     # RSI confirmation
     rsi_confirmed = rsi.iloc[-2] > rsi_threshold
 
-    return ema_crossover and rsi_confirmed
+    result = ema_crossover and rsi_confirmed
+
+    if debug:
+        _logger.info(
+            f"[SIGNAL-CHECK] {state.strategy_id}: ema_crossover={ema_crossover}, "
+            f"rsi_confirmed={rsi_confirmed} → go_long={result}"
+        )
+
+    return result
 
 
 def go_short(state, df) -> bool:

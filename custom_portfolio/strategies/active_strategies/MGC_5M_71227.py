@@ -8,6 +8,10 @@ Original logic:
 - EMA(Open) crosses above Close
 """
 
+import logging
+
+_logger = logging.getLogger(__name__)
+
 STRATEGY_CONFIG = {
     "strategy_id": "",  # Use filename
     "symbol": "MGC",
@@ -35,7 +39,7 @@ STRATEGY_CONFIG = {
 }
 
 
-def populate_indicators(df, params):
+def populate_indicators(df, params, debug=False, strategy_id=""):
     """
     Calculate indicators for dual RSI crossover with EMA crossover.
     """
@@ -56,6 +60,15 @@ def populate_indicators(df, params):
     # EMA of Open
     indicators["ema_open"] = ta.ema(df["open"], length=ema_period)
 
+    if debug and indicators.get("rsi_high") is not None and len(indicators["rsi_high"]) >= 3:
+        rh = indicators["rsi_high"]
+        rc = indicators["rsi_close"]
+        eo = indicators.get("ema_open")
+        _logger.info(
+            f"[INDICATOR] {strategy_id}: rsi_h={rh.iloc[-2]:.2f}, "
+            f"rsi_c={(rc.iloc[-2] if rc is not None else 0):.2f}, ema_o={(eo.iloc[-2] if eo is not None else 0):.2f}"
+        )
+
     return indicators
 
 
@@ -65,10 +78,12 @@ def go_long(state, df) -> bool:
     - RSI(High) crosses above RSI(Close)
     - EMA(Open) crosses above Close (was above, now below - price rallying through EMA)
     """
+    debug = getattr(state, "debug_indicators", False)
+
     if len(df) < 4:
         return False
 
-    indicators = populate_indicators(df, state.params)
+    indicators = populate_indicators(df, state.params, debug=debug, strategy_id=state.strategy_id)
     rsi_high = indicators.get("rsi_high")
     rsi_close = indicators.get("rsi_close")
     ema_open = indicators.get("ema_open")
@@ -94,7 +109,14 @@ def go_long(state, df) -> bool:
 
     ema_cross = (ema_prev2 < close_prev2) and (ema_prev1 > close_prev1)
 
-    return rsi_crossover and ema_cross
+    result = rsi_crossover and ema_cross
+
+    if debug:
+        _logger.info(
+            f"[SIGNAL-CHECK] {state.strategy_id}: rsi_x={rsi_crossover}, " f"ema_x={ema_cross} → go_long={result}"
+        )
+
+    return result
 
 
 def go_short(state, df) -> bool:

@@ -7,6 +7,10 @@ Original logic:
 - MACD1(Low) line crosses above MACD2(Close) signal
 """
 
+import logging
+
+_logger = logging.getLogger(__name__)
+
 STRATEGY_CONFIG = {
     "strategy_id": "",  # Use filename
     "symbol": "MGC",
@@ -37,7 +41,7 @@ STRATEGY_CONFIG = {
 }
 
 
-def populate_indicators(df, params):
+def populate_indicators(df, params, debug=False, strategy_id=""):
     """
     Calculate indicators for dual MACD crossover.
     """
@@ -62,6 +66,14 @@ def populate_indicators(df, params):
     if macd2_result is not None:
         indicators["macd2_signal"] = macd2_result.iloc[:, 2]
 
+    if debug and indicators.get("macd1_line") is not None and len(indicators["macd1_line"]) >= 3:
+        m1 = indicators["macd1_line"]
+        m2 = indicators.get("macd2_signal")
+        _logger.info(
+            f"[INDICATOR] {strategy_id}: macd1[-2]={m1.iloc[-2]:.2f}, "
+            f"macd2_sig[-2]={(m2.iloc[-2] if m2 is not None else 0):.2f}"
+        )
+
     return indicators
 
 
@@ -70,10 +82,12 @@ def go_long(state, df) -> bool:
     Long entry signal:
     - MACD1(Low) line crosses above MACD2(Close) signal
     """
+    debug = getattr(state, "debug_indicators", False)
+
     if len(df) < 4:
         return False
 
-    indicators = populate_indicators(df, state.params)
+    indicators = populate_indicators(df, state.params, debug=debug, strategy_id=state.strategy_id)
     macd1_line = indicators.get("macd1_line")
     macd2_signal = indicators.get("macd2_signal")
 
@@ -89,6 +103,9 @@ def go_long(state, df) -> bool:
     macd2_prev1 = macd2_signal.iloc[-2]
 
     macd_crossover = (macd1_prev2 < macd2_prev2) and (macd1_prev1 > macd2_prev1)
+
+    if debug:
+        _logger.info(f"[SIGNAL-CHECK] {state.strategy_id}: macd_cross={macd_crossover} → go_long={macd_crossover}")
 
     return macd_crossover
 

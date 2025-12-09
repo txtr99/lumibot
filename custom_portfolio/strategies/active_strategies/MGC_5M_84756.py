@@ -7,6 +7,10 @@ Original logic:
 - RSI(Open) crosses above threshold (58.8)
 """
 
+import logging
+
+_logger = logging.getLogger(__name__)
+
 STRATEGY_CONFIG = {
     "strategy_id": "",  # Use filename
     "symbol": "MGC",
@@ -33,7 +37,7 @@ STRATEGY_CONFIG = {
 }
 
 
-def populate_indicators(df, params):
+def populate_indicators(df, params, debug=False, strategy_id=""):
     """
     Calculate indicators for RSI threshold cross.
     """
@@ -46,6 +50,10 @@ def populate_indicators(df, params):
     # RSI on Open
     indicators["rsi_open"] = ta.rsi(df["open"], length=rsi_period)
 
+    if debug and indicators.get("rsi_open") is not None and len(indicators["rsi_open"]) >= 3:
+        ro = indicators["rsi_open"]
+        _logger.info(f"[INDICATOR] {strategy_id}: rsi_open={ro.iloc[-2]:.2f}")
+
     return indicators
 
 
@@ -54,10 +62,12 @@ def go_long(state, df) -> bool:
     Long entry signal:
     - RSI(Open) crosses above threshold (from below to above)
     """
+    debug = getattr(state, "debug_indicators", False)
+
     if len(df) < 4:
         return False
 
-    indicators = populate_indicators(df, state.params)
+    indicators = populate_indicators(df, state.params, debug=debug, strategy_id=state.strategy_id)
     rsi_open = indicators.get("rsi_open")
     rsi_threshold = state.params.get("rsi_threshold", 58.8)
 
@@ -71,6 +81,11 @@ def go_long(state, df) -> bool:
     rsi_prev1 = rsi_open.iloc[-2]
 
     rsi_cross_threshold = (rsi_prev2 < rsi_threshold) and (rsi_prev1 > rsi_threshold)
+
+    if debug:
+        _logger.info(
+            f"[SIGNAL-CHECK] {state.strategy_id}: rsi_x_th={rsi_cross_threshold} → go_long={rsi_cross_threshold}"
+        )
 
     return rsi_cross_threshold
 

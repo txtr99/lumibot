@@ -8,6 +8,10 @@ Original logic:
 - EMA(WeightedClose) < EMA(Low)
 """
 
+import logging
+
+_logger = logging.getLogger(__name__)
+
 STRATEGY_CONFIG = {
     "strategy_id": "",  # Use filename
     "symbol": "MGC",
@@ -39,7 +43,7 @@ STRATEGY_CONFIG = {
 }
 
 
-def populate_indicators(df, params):
+def populate_indicators(df, params, debug=False, strategy_id=""):
     """
     Calculate indicators for dual MACD signal crossover with EMA filter.
     """
@@ -74,6 +78,18 @@ def populate_indicators(df, params):
     # EMA of Low
     indicators["ema_low"] = ta.ema(df["low"], length=ema2_period)
 
+    if debug and indicators.get("macd1_signal") is not None and len(indicators["macd1_signal"]) >= 3:
+        m1 = indicators["macd1_signal"]
+        m2 = indicators.get("macd2_signal")
+        ewc = indicators.get("ema_wc")
+        elow = indicators.get("ema_low")
+        _logger.info(
+            f"[INDICATOR] {strategy_id}: m1_sig={m1.iloc[-2]:.2f}, "
+            f"m2_sig={(m2.iloc[-2] if m2 is not None else 0):.2f}, "
+            f"ewc={(ewc.iloc[-2] if ewc is not None else 0):.2f}, "
+            f"elow={(elow.iloc[-2] if elow is not None else 0):.2f}"
+        )
+
     return indicators
 
 
@@ -83,10 +99,12 @@ def go_long(state, df) -> bool:
     - MACD1 signal crosses above MACD2 signal
     - EMA(WeightedClose) < EMA(Low) (oversold condition)
     """
+    debug = getattr(state, "debug_indicators", False)
+
     if len(df) < 4:
         return False
 
-    indicators = populate_indicators(df, state.params)
+    indicators = populate_indicators(df, state.params, debug=debug, strategy_id=state.strategy_id)
     macd1_signal = indicators.get("macd1_signal")
     macd2_signal = indicators.get("macd2_signal")
     ema_wc = indicators.get("ema_wc")
@@ -108,7 +126,15 @@ def go_long(state, df) -> bool:
     # EMA filter (oversold)
     ema_wc_below_low = ema_wc.iloc[-2] < ema_low.iloc[-2]
 
-    return macd_crossover and ema_wc_below_low
+    result = macd_crossover and ema_wc_below_low
+
+    if debug:
+        _logger.info(
+            f"[SIGNAL-CHECK] {state.strategy_id}: macd_x={macd_crossover}, "
+            f"ewc<low={ema_wc_below_low} → go_long={result}"
+        )
+
+    return result
 
 
 def go_short(state, df) -> bool:

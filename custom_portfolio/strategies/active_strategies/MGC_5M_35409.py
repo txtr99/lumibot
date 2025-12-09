@@ -8,6 +8,11 @@ Original logic:
 - EMA crosses above Close (reversal)
 """
 
+import logging
+
+# Logger for debug output (controlled by DEBUG_INDICATORS env var)
+_logger = logging.getLogger(__name__)
+
 STRATEGY_CONFIG = {
     "strategy_id": "",  # Use filename
     "symbol": "MGC",
@@ -34,7 +39,7 @@ STRATEGY_CONFIG = {
 }
 
 
-def populate_indicators(df, params):
+def populate_indicators(df, params, debug=False, strategy_id=""):
     """
     Calculate indicators for Low cross below MA with EMA reversal.
     """
@@ -51,6 +56,15 @@ def populate_indicators(df, params):
     # EMA of Close
     indicators["ema"] = ta.ema(df["close"], length=ema_period)
 
+    # Debug logging if enabled
+    if debug and indicators.get("sma_low") is not None and len(indicators["sma_low"]) >= 3:
+        sma_low = indicators["sma_low"]
+        ema = indicators["ema"]
+        _logger.info(
+            f"[INDICATOR] {strategy_id}: sma_low[-2]={sma_low.iloc[-2]:.2f}, "
+            f"ema[-2]={(ema.iloc[-2] if ema is not None else 0):.2f}"
+        )
+
     return indicators
 
 
@@ -62,10 +76,12 @@ def go_long(state, df) -> bool:
 
     This is a mean reversion entry after a dip.
     """
+    debug = getattr(state, "debug_indicators", False)
+
     if len(df) < 4:
         return False
 
-    indicators = populate_indicators(df, state.params)
+    indicators = populate_indicators(df, state.params, debug=debug, strategy_id=state.strategy_id)
     sma_low = indicators.get("sma_low")
     ema = indicators.get("ema")
 
@@ -88,7 +104,15 @@ def go_long(state, df) -> bool:
     close_prev1 = df["close"].iloc[-2]
     ema_cross = (ema_prev2 > close_prev2) and (ema_prev1 < close_prev1)
 
-    return low_cross_below_sma and ema_cross
+    result = low_cross_below_sma and ema_cross
+
+    if debug:
+        _logger.info(
+            f"[SIGNAL-CHECK] {state.strategy_id}: low_cross_below_sma={low_cross_below_sma}, "
+            f"ema_cross={ema_cross} → go_long={result}"
+        )
+
+    return result
 
 
 def go_short(state, df) -> bool:

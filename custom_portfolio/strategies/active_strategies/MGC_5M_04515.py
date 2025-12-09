@@ -4,6 +4,11 @@ Converted from StrategyQuant X EasyLanguage
 Long-only strategy for MGC (Micro Gold Futures)
 """
 
+import logging
+
+# Logger for debug output (controlled by DEBUG_INDICATORS env var)
+_logger = logging.getLogger(__name__)
+
 STRATEGY_CONFIG = {
     "strategy_id": "",  # Use filename
     "symbol": "MGC",
@@ -33,7 +38,7 @@ STRATEGY_CONFIG = {
 }
 
 
-def populate_indicators(df, params):
+def populate_indicators(df, params, debug=False, strategy_id=""):
     """
     Calculate indicators for EMA crossover with MACD filter.
     """
@@ -57,6 +62,18 @@ def populate_indicators(df, params):
         indicators["macd_line"] = macd_result.iloc[:, 0]  # MACD line
         indicators["macd_signal"] = macd_result.iloc[:, 2]  # Signal line
 
+    # Debug logging if enabled
+    if debug and indicators.get("ema1") is not None and len(indicators["ema1"]) >= 3:
+        ema1 = indicators["ema1"]
+        ema2 = indicators["ema2"]
+        macd_line = indicators.get("macd_line")
+        macd_sig = indicators.get("macd_signal")
+        _logger.info(
+            f"[INDICATOR] {strategy_id}: ema1[-2]={ema1.iloc[-2]:.2f}, ema2[-2]={ema2.iloc[-2]:.2f}, "
+            f"macd={(macd_line.iloc[-2] if macd_line is not None else 0):.2f}, "
+            f"macd_sig={(macd_sig.iloc[-2] if macd_sig is not None else 0):.2f}"
+        )
+
     return indicators
 
 
@@ -66,10 +83,12 @@ def go_long(state, df) -> bool:
     - EMA1 crosses above EMA2
     - MACD line > Signal line (bullish confirmation)
     """
+    debug = getattr(state, "debug_indicators", False)
+
     if len(df) < 4:
         return False
 
-    indicators = populate_indicators(df, state.params)
+    indicators = populate_indicators(df, state.params, debug=debug, strategy_id=state.strategy_id)
     ema1 = indicators.get("ema1")
     ema2 = indicators.get("ema2")
     macd_line = indicators.get("macd_line")
@@ -91,7 +110,15 @@ def go_long(state, df) -> bool:
     # MACD bullish
     macd_bullish = macd_line.iloc[-2] > macd_signal.iloc[-2]
 
-    return ema_crossover and macd_bullish
+    result = ema_crossover and macd_bullish
+
+    if debug:
+        _logger.info(
+            f"[SIGNAL-CHECK] {state.strategy_id}: ema_cross={ema_crossover}, "
+            f"macd_bullish={macd_bullish} → go_long={result}"
+        )
+
+    return result
 
 
 def go_short(state, df) -> bool:

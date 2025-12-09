@@ -222,6 +222,7 @@ class MultiStrategyExecutorEnhanced:
         ignore_calendar: bool = False,
         broker_strategy_name: Optional[str] = None,
         deep_portfolio_debug: bool = False,
+        debug_indicators: bool = False,
         bracket_manager=None,
         order_registry=None,
     ):
@@ -239,6 +240,7 @@ class MultiStrategyExecutorEnhanced:
             ignore_calendar: If True, skip calendar/session gating (useful for backtests)
             broker_strategy_name: Optional wrapper strategy name to tag real broker orders
             deep_portfolio_debug: Emit verbose per-iteration logs when True
+            debug_indicators: Enable per-strategy indicator debug logging when True
             order_registry: OrderRegistry instance for centralized order tracking
 
         Note:
@@ -263,6 +265,7 @@ class MultiStrategyExecutorEnhanced:
         self.ignore_calendar = ignore_calendar
         self.broker_strategy_name = broker_strategy_name
         self.deep_portfolio_debug = deep_portfolio_debug
+        self.debug_indicators = debug_indicators
         self.bracket_manager = bracket_manager  # For race-safe close pattern
         self.order_registry = order_registry  # For bulletproof order tracking
         self.total_initial_capital = shared_initial_capital
@@ -291,6 +294,9 @@ class MultiStrategyExecutorEnhanced:
 
             # Store strategy type for dynamic loading
             state.strategy_type = config.get("strategy_type", "DefaultStrategy")
+
+            # Set debug flag for per-strategy indicator logging
+            state.debug_indicators = self.debug_indicators
 
             self.strategies.append(state)
 
@@ -863,7 +869,14 @@ class MultiStrategyExecutorEnhanced:
                 vis_func = getattr(strategy_state, "get_signal_visibility_func", None)
                 if callable(vis_func) and len(df) >= min_required:
                     try:
+                        vis_start = time.perf_counter()
                         vis_result = vis_func(strategy_state, df)
+                        vis_elapsed = time.perf_counter() - vis_start
+                        if vis_elapsed > 5.0:
+                            self.logger.warning(
+                                f"[TIMING-ALERT] {strategy_state.strategy_id} vis_func took {vis_elapsed:.2f}s (>5s)! "
+                                f"iter={self.iteration_count} ts={current_time}"
+                            )
                         # Check for NaN values in visibility results
                         has_nan = False
                         if vis_result:
@@ -989,9 +1002,15 @@ class MultiStrategyExecutorEnhanced:
                     order = self._create_bracket_order_for_strategy(strategy_state, signal, df)
                     if order:
                         orders_to_submit.append((strategy_state, order, False, "entry", None))
+                per_strategy_elapsed = time.perf_counter() - per_strategy_start
+                if per_strategy_elapsed > 5.0:
+                    self.logger.warning(
+                        f"[TIMING-ALERT] {strategy_state.strategy_id} TOTAL took {per_strategy_elapsed:.2f}s! "
+                        f"iter={self.iteration_count} ts={current_time}"
+                    )
                 self._log_verbose(
                     f"{_YELLOW}[PROCESS] {strategy_state.strategy_id} done in "
-                    f"{time.perf_counter() - per_strategy_start:.4f}s virt_qty={virtual_qty}{_RESET}"
+                    f"{per_strategy_elapsed:.4f}s virt_qty={virtual_qty}{_RESET}"
                 )
 
             except Exception as e:
@@ -1093,7 +1112,14 @@ class MultiStrategyExecutorEnhanced:
         sig_func = getattr(strategy_state, "generate_signal_func", None)
         if callable(sig_func):
             try:
+                sig_start = time.perf_counter()
                 signal = sig_func(strategy_state, market_data)
+                sig_elapsed = time.perf_counter() - sig_start
+                if sig_elapsed > 5.0:
+                    self.logger.warning(
+                        f"[TIMING-ALERT] {strategy_state.strategy_id} sig_func took {sig_elapsed:.2f}s (>5s)! "
+                        f"iter={self.iteration_count}"
+                    )
                 # Check for NaN or invalid signal
                 if signal is None or (isinstance(signal, float) and pd.isna(signal)):
                     self.logger.warning(f"Signal is NaN/None for {strategy_state.strategy_id}")

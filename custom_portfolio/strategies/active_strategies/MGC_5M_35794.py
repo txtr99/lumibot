@@ -8,6 +8,11 @@ Original logic:
 - Close crosses above EMA (reversal)
 """
 
+import logging
+
+# Logger for debug output (controlled by DEBUG_INDICATORS env var)
+_logger = logging.getLogger(__name__)
+
 STRATEGY_CONFIG = {
     "strategy_id": "",  # Use filename
     "symbol": "MGC",
@@ -34,7 +39,7 @@ STRATEGY_CONFIG = {
 }
 
 
-def populate_indicators(df, params):
+def populate_indicators(df, params, debug=False, strategy_id=""):
     """
     Calculate indicators for High cross below MA with EMA reversal.
     """
@@ -51,6 +56,15 @@ def populate_indicators(df, params):
     # EMA of Close
     indicators["ema"] = ta.ema(df["close"], length=ema_period)
 
+    # Debug logging if enabled
+    if debug and indicators.get("sma_high") is not None and len(indicators["sma_high"]) >= 3:
+        sma_high = indicators["sma_high"]
+        ema = indicators["ema"]
+        _logger.info(
+            f"[INDICATOR] {strategy_id}: sma_high[-2]={sma_high.iloc[-2]:.2f}, "
+            f"ema[-2]={(ema.iloc[-2] if ema is not None else 0):.2f}"
+        )
+
     return indicators
 
 
@@ -60,10 +74,12 @@ def go_long(state, df) -> bool:
     - High crosses below its SMA
     - Close crosses above EMA (reversal confirmation)
     """
+    debug = getattr(state, "debug_indicators", False)
+
     if len(df) < 4:
         return False
 
-    indicators = populate_indicators(df, state.params)
+    indicators = populate_indicators(df, state.params, debug=debug, strategy_id=state.strategy_id)
     sma_high = indicators.get("sma_high")
     ema = indicators.get("ema")
 
@@ -86,7 +102,15 @@ def go_long(state, df) -> bool:
     ema_prev1 = ema.iloc[-2]
     close_cross_ema = (close_prev2 < ema_prev2) and (close_prev1 > ema_prev1)
 
-    return high_cross_below_sma and close_cross_ema
+    result = high_cross_below_sma and close_cross_ema
+
+    if debug:
+        _logger.info(
+            f"[SIGNAL-CHECK] {state.strategy_id}: high_cross_below_sma={high_cross_below_sma}, "
+            f"close_cross_ema={close_cross_ema} → go_long={result}"
+        )
+
+    return result
 
 
 def go_short(state, df) -> bool:

@@ -4,6 +4,11 @@ Converted from StrategyQuant X EasyLanguage
 Long-only strategy for MGC (Micro Gold Futures)
 """
 
+import logging
+
+# Logger for debug output (controlled by DEBUG_INDICATORS env var)
+_logger = logging.getLogger(__name__)
+
 STRATEGY_CONFIG = {
     "strategy_id": "",  # Use filename
     "symbol": "MGC",
@@ -31,7 +36,7 @@ STRATEGY_CONFIG = {
 }
 
 
-def populate_indicators(df, params):
+def populate_indicators(df, params, debug=False, strategy_id=""):
     """
     Calculate indicators for RSI rising strategy.
     """
@@ -48,6 +53,15 @@ def populate_indicators(df, params):
     # EMA
     indicators["ema"] = ta.ema(df["close"], length=ema_period)
 
+    # Debug logging if enabled
+    if debug and indicators.get("rsi") is not None and len(indicators["rsi"]) >= 3:
+        rsi = indicators["rsi"]
+        ema = indicators["ema"]
+        _logger.info(
+            f"[INDICATOR] {strategy_id}: rsi[-2]={rsi.iloc[-2]:.2f}, "
+            f"ema[-2]={(ema.iloc[-2] if ema is not None else 0):.2f}"
+        )
+
     return indicators
 
 
@@ -57,10 +71,12 @@ def go_long(state, df) -> bool:
     - RSI is rising (making higher values) for N consecutive bars
     - Close above EMA
     """
+    debug = getattr(state, "debug_indicators", False)
+
     if len(df) < 6:
         return False
 
-    indicators = populate_indicators(df, state.params)
+    indicators = populate_indicators(df, state.params, debug=debug, strategy_id=state.strategy_id)
     rsi = indicators.get("rsi")
     ema = indicators.get("ema")
     rising_count = state.params.get("rising_count", 3)
@@ -80,7 +96,15 @@ def go_long(state, df) -> bool:
     # Close above EMA
     close_above_ema = df["close"].iloc[-2] > ema.iloc[-2]
 
-    return rsi_rising and close_above_ema
+    result = rsi_rising and close_above_ema
+
+    if debug:
+        _logger.info(
+            f"[SIGNAL-CHECK] {state.strategy_id}: rsi_rising={rsi_rising}, "
+            f"close_above_ema={close_above_ema} → go_long={result}"
+        )
+
+    return result
 
 
 def go_short(state, df) -> bool:

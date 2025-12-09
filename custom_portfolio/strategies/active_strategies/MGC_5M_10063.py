@@ -4,6 +4,11 @@ Converted from StrategyQuant X EasyLanguage
 Long-only strategy for MGC (Micro Gold Futures)
 """
 
+import logging
+
+# Logger for debug output (controlled by DEBUG_INDICATORS env var)
+_logger = logging.getLogger(__name__)
+
 STRATEGY_CONFIG = {
     "strategy_id": "",  # Use filename
     "symbol": "MGC",
@@ -33,7 +38,7 @@ STRATEGY_CONFIG = {
 }
 
 
-def populate_indicators(df, params):
+def populate_indicators(df, params, debug=False, strategy_id=""):
     """
     Calculate indicators for MACD crossover with RSI filter.
     """
@@ -55,6 +60,16 @@ def populate_indicators(df, params):
     # RSI
     indicators["rsi"] = ta.rsi(df["close"], length=rsi_period)
 
+    # Debug logging if enabled
+    if debug and indicators.get("macd_line") is not None and len(indicators["macd_line"]) >= 3:
+        macd_line = indicators["macd_line"]
+        macd_sig = indicators["macd_signal"]
+        rsi = indicators["rsi"]
+        _logger.info(
+            f"[INDICATOR] {strategy_id}: macd={macd_line.iloc[-2]:.2f}, "
+            f"macd_sig={macd_sig.iloc[-2]:.2f}, rsi[-2]={(rsi.iloc[-2] if rsi is not None else 0):.2f}"
+        )
+
     return indicators
 
 
@@ -64,10 +79,12 @@ def go_long(state, df) -> bool:
     - MACD line crosses above Signal line
     - RSI above threshold (confirming momentum)
     """
+    debug = getattr(state, "debug_indicators", False)
+
     if len(df) < 4:
         return False
 
-    indicators = populate_indicators(df, state.params)
+    indicators = populate_indicators(df, state.params, debug=debug, strategy_id=state.strategy_id)
     macd_line = indicators.get("macd_line")
     macd_signal = indicators.get("macd_signal")
     rsi = indicators.get("rsi")
@@ -89,7 +106,15 @@ def go_long(state, df) -> bool:
     # RSI above threshold
     rsi_bullish = rsi.iloc[-2] > rsi_threshold
 
-    return macd_crossover and rsi_bullish
+    result = macd_crossover and rsi_bullish
+
+    if debug:
+        _logger.info(
+            f"[SIGNAL-CHECK] {state.strategy_id}: macd_crossover={macd_crossover}, "
+            f"rsi_bullish={rsi_bullish} → go_long={result}"
+        )
+
+    return result
 
 
 def go_short(state, df) -> bool:

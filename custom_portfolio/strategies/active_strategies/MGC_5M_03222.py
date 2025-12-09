@@ -4,6 +4,11 @@ Converted from StrategyQuant X EasyLanguage
 Long-only strategy for MGC (Micro Gold Futures)
 """
 
+import logging
+
+# Logger for debug output (controlled by DEBUG_INDICATORS env var)
+_logger = logging.getLogger(__name__)
+
 STRATEGY_CONFIG = {
     "strategy_id": "",  # Use filename
     "symbol": "MGC",
@@ -31,14 +36,12 @@ STRATEGY_CONFIG = {
 }
 
 
-def populate_indicators(df, params):
+def populate_indicators(df, params, debug=False, strategy_id=""):
     """
     Calculate indicators for RSI crossover strategy.
     Entry: RSI crossover (RSI1 crosses above RSI2) AND Low < Close AND Close crosses above SMA
     """
     import pandas_ta as ta
-
-    indicators = {}
 
     rsi1_period = params.get("rsi1_period", 20)
     rsi2_period = params.get("rsi2_period", 50)
@@ -46,11 +49,25 @@ def populate_indicators(df, params):
 
     # RSI on MedianPrice
     median_price = (df["high"] + df["low"]) / 2
-    indicators["rsi1"] = ta.rsi(median_price, length=rsi1_period)
-    indicators["rsi2"] = ta.rsi(median_price, length=rsi2_period)
+    rsi1 = ta.rsi(median_price, length=rsi1_period)
+    rsi2 = ta.rsi(median_price, length=rsi2_period)
 
     # SMA of close for crossover detection
-    indicators["sma_close"] = ta.sma(df["close"], length=cross_ma_period)
+    sma_close = ta.sma(df["close"], length=cross_ma_period)
+
+    indicators = {
+        "rsi1": rsi1,
+        "rsi2": rsi2,
+        "sma_close": sma_close,
+    }
+
+    # Debug logging if enabled
+    if debug and rsi1 is not None and rsi2 is not None and len(rsi1) >= 3:
+        _logger.info(
+            f"[INDICATOR] {strategy_id}: rsi1[-2]={rsi1.iloc[-2]:.2f}, rsi2[-2]={rsi2.iloc[-2]:.2f}, "
+            f"rsi1[-3]={rsi1.iloc[-3]:.2f}, rsi2[-3]={rsi2.iloc[-3]:.2f}, "
+            f"close[-2]={df['close'].iloc[-2]:.2f}, sma[-2]={sma_close.iloc[-2]:.2f}"
+        )
 
     return indicators
 
@@ -62,10 +79,12 @@ def go_long(state, df) -> bool:
     - Low < Close (on previous bar)
     - Close crosses above SMA
     """
+    debug = getattr(state, "debug_indicators", False)
+
     if len(df) < 4:
         return False
 
-    indicators = populate_indicators(df, state.params)
+    indicators = populate_indicators(df, state.params, debug=debug, strategy_id=state.strategy_id)
     rsi1 = indicators.get("rsi1")
     rsi2 = indicators.get("rsi2")
     sma_close = indicators.get("sma_close")
@@ -81,20 +100,28 @@ def go_long(state, df) -> bool:
     rsi1_prev1 = rsi1.iloc[-2]
     rsi2_prev1 = rsi2.iloc[-2]
 
-    rsi_crossover = (rsi1_prev2 < rsi2_prev2) and (rsi1_prev1 > rsi2_prev1)
+    cond_rsi_crossover = (rsi1_prev2 < rsi2_prev2) and (rsi1_prev1 > rsi2_prev1)
 
     # Low < Close on previous bar
     low_prev = df["low"].iloc[-2]
     close_prev = df["close"].iloc[-2]
-    low_below_close = low_prev < close_prev
+    cond_low_below_close = low_prev < close_prev
 
     # Close crosses above SMA
     close_prev2 = df["close"].iloc[-3]
     sma_prev2 = sma_close.iloc[-3]
     sma_prev1 = sma_close.iloc[-2]
-    close_cross_sma = (close_prev2 < sma_prev2) and (close_prev > sma_prev1)
+    cond_close_cross_sma = (close_prev2 < sma_prev2) and (close_prev > sma_prev1)
 
-    return rsi_crossover and low_below_close and close_cross_sma
+    result = cond_rsi_crossover and cond_low_below_close and cond_close_cross_sma
+
+    if debug:
+        _logger.info(
+            f"[SIGNAL-CHECK] {state.strategy_id}: rsi_cross={cond_rsi_crossover}, "
+            f"low<close={cond_low_below_close}, close_x_sma={cond_close_cross_sma} → go_long={result}"
+        )
+
+    return result
 
 
 def go_short(state, df) -> bool:

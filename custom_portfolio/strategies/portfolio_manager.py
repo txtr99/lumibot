@@ -318,6 +318,7 @@ class PortfolioManager:
         ignore_calendar: bool = False,
         broker_strategy_name: Optional[str] = None,
         deep_portfolio_debug: bool = False,
+        debug_indicators: bool = False,
         bracket_manager=None,
         order_registry=None,
     ):
@@ -336,6 +337,7 @@ class PortfolioManager:
             ignore_calendar: If True, skip calendar/session gating (useful for backtests)
             broker_strategy_name: Optional wrapper strategy name used when submitting real orders
             deep_portfolio_debug: Emit verbose executor logs when True
+            debug_indicators: Enable per-strategy indicator debug logging when True
             bracket_manager: Optional BracketOrderManager for race-safe close pattern (live mode)
             order_registry: Optional OrderRegistry for bulletproof order tracking (live mode)
 
@@ -349,6 +351,7 @@ class PortfolioManager:
         self.calendar = calendar
         self.broker_strategy_name = broker_strategy_name
         self.deep_portfolio_debug = deep_portfolio_debug
+        self.debug_indicators = debug_indicators
         self.bracket_manager = bracket_manager
         self.order_registry = order_registry
 
@@ -378,6 +381,7 @@ class PortfolioManager:
             "ignore_calendar": ignore_calendar,
             "broker_strategy_name": broker_strategy_name,
             "deep_portfolio_debug": deep_portfolio_debug,
+            "debug_indicators": debug_indicators,
             "bracket_manager": bracket_manager,
             "order_registry": order_registry,
         }

@@ -8,6 +8,10 @@ Original logic:
 - MACD crosses above threshold (mean reversion)
 """
 
+import logging
+
+_logger = logging.getLogger(__name__)
+
 STRATEGY_CONFIG = {
     "strategy_id": "",  # Use filename
     "symbol": "MGC",
@@ -39,7 +43,7 @@ STRATEGY_CONFIG = {
 }
 
 
-def populate_indicators(df, params):
+def populate_indicators(df, params, debug=False, strategy_id=""):
     """
     Calculate indicators for EMA falling with MACD threshold cross.
     """
@@ -60,6 +64,14 @@ def populate_indicators(df, params):
     if macd_result is not None:
         indicators["macd_line"] = macd_result.iloc[:, 0]
 
+    if debug and indicators.get("ema") is not None and len(indicators["ema"]) >= 3:
+        ema = indicators["ema"]
+        macd = indicators.get("macd_line")
+        _logger.info(
+            f"[INDICATOR] {strategy_id}: ema[-2]={ema.iloc[-2]:.2f}, ema[-3]={ema.iloc[-3]:.2f}, "
+            f"macd[-2]={(macd.iloc[-2] if macd is not None else 0):.2f}"
+        )
+
     return indicators
 
 
@@ -69,10 +81,12 @@ def go_long(state, df) -> bool:
     - EMA is falling (making lower values for N bars)
     - MACD crosses above threshold (from below -0.8 to above -0.8, still below 0.5)
     """
+    debug = getattr(state, "debug_indicators", False)
+
     if len(df) < 6:
         return False
 
-    indicators = populate_indicators(df, state.params)
+    indicators = populate_indicators(df, state.params, debug=debug, strategy_id=state.strategy_id)
     ema = indicators.get("ema")
     macd_line = indicators.get("macd_line")
     falling_bars = state.params.get("falling_bars", 3)
@@ -99,7 +113,15 @@ def go_long(state, df) -> bool:
     # MACD still below upper threshold
     macd_below_high = macd_prev1 < macd_threshold_high
 
-    return ema_falling and macd_cross_threshold and macd_below_high
+    result = ema_falling and macd_cross_threshold and macd_below_high
+
+    if debug:
+        _logger.info(
+            f"[SIGNAL-CHECK] {state.strategy_id}: ema_fall={ema_falling}, "
+            f"macd_xth={macd_cross_threshold}, macd<hi={macd_below_high} → go_long={result}"
+        )
+
+    return result
 
 
 def go_short(state, df) -> bool:

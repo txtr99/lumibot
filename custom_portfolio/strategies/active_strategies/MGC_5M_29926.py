@@ -9,6 +9,11 @@ Original logic:
 - RSI crossover (RSI on Low crosses above RSI on MedianPrice)
 """
 
+import logging
+
+# Logger for debug output (controlled by DEBUG_INDICATORS env var)
+_logger = logging.getLogger(__name__)
+
 STRATEGY_CONFIG = {
     "strategy_id": "",  # Use filename
     "symbol": "MGC",
@@ -38,7 +43,7 @@ STRATEGY_CONFIG = {
 }
 
 
-def populate_indicators(df, params):
+def populate_indicators(df, params, debug=False, strategy_id=""):
     """
     Calculate indicators for complex RSI/EMA strategy.
     """
@@ -72,6 +77,19 @@ def populate_indicators(df, params):
     indicators["rsi_low"] = ta.rsi(df["low"], length=rsi1_period)
     indicators["rsi_median"] = ta.rsi(median_price, length=rsi2_period)
 
+    # Debug logging if enabled
+    if debug and indicators.get("rsi_typical") is not None and len(indicators["rsi_typical"]) >= 3:
+        rsi_typ = indicators["rsi_typical"]
+        rsi_ma = indicators.get("rsi_ma")
+        ema_typ = indicators.get("ema_typical")
+        ema_low = indicators.get("ema_low")
+        _logger.info(
+            f"[INDICATOR] {strategy_id}: rsi_typ[-2]={rsi_typ.iloc[-2]:.2f}, "
+            f"rsi_ma[-2]={(rsi_ma.iloc[-2] if rsi_ma is not None else 0):.2f}, "
+            f"ema_typ[-2]={(ema_typ.iloc[-2] if ema_typ is not None else 0):.2f}, "
+            f"ema_low[-2]={(ema_low.iloc[-2] if ema_low is not None else 0):.2f}"
+        )
+
     return indicators
 
 
@@ -82,10 +100,12 @@ def go_long(state, df) -> bool:
     - EMA of TypicalPrice lower than EMA of Low (for 2 bars)
     - RSI(Low) crosses above RSI(MedianPrice)
     """
+    debug = getattr(state, "debug_indicators", False)
+
     if len(df) < 5:
         return False
 
-    indicators = populate_indicators(df, state.params)
+    indicators = populate_indicators(df, state.params, debug=debug, strategy_id=state.strategy_id)
     rsi_typical = indicators.get("rsi_typical")
     rsi_ma = indicators.get("rsi_ma")
     ema_typical = indicators.get("ema_typical")
@@ -112,7 +132,15 @@ def go_long(state, df) -> bool:
 
     rsi_crossover = (rsi_low_prev2 < rsi_median_prev2) and (rsi_low_prev1 > rsi_median_prev1)
 
-    return rsi_above_ma and ema_lower and rsi_crossover
+    result = rsi_above_ma and ema_lower and rsi_crossover
+
+    if debug:
+        _logger.info(
+            f"[SIGNAL-CHECK] {state.strategy_id}: rsi_above_ma={rsi_above_ma}, "
+            f"ema_lower={ema_lower}, rsi_crossover={rsi_crossover} → go_long={result}"
+        )
+
+    return result
 
 
 def go_short(state, df) -> bool:

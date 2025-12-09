@@ -7,6 +7,10 @@ Original logic:
 - RSI(Low) was below RSI(TypicalPrice) for N bars, now equals or higher
 """
 
+import logging
+
+_logger = logging.getLogger(__name__)
+
 STRATEGY_CONFIG = {
     "strategy_id": "",  # Use filename
     "symbol": "MGC",
@@ -34,7 +38,7 @@ STRATEGY_CONFIG = {
 }
 
 
-def populate_indicators(df, params):
+def populate_indicators(df, params, debug=False, strategy_id=""):
     """
     Calculate indicators for RSI lower count signal.
     """
@@ -54,6 +58,14 @@ def populate_indicators(df, params):
     # RSI on Typical Price
     indicators["rsi_typical"] = ta.rsi(typical_price, length=rsi2_period)
 
+    if debug and indicators.get("rsi_low") is not None and len(indicators["rsi_low"]) >= 3:
+        rl = indicators["rsi_low"]
+        rt = indicators["rsi_typical"]
+        _logger.info(
+            f"[INDICATOR] {strategy_id}: rsi_low[-2]={rl.iloc[-2]:.2f}, "
+            f"rsi_typ[-2]={(rt.iloc[-2] if rt is not None else 0):.2f}"
+        )
+
     return indicators
 
 
@@ -63,10 +75,12 @@ def go_long(state, df) -> bool:
     - RSI(Low) was below RSI(TypicalPrice) for N consecutive bars
     - Now RSI(Low) >= RSI(TypicalPrice) (crossover occurred)
     """
+    debug = getattr(state, "debug_indicators", False)
+
     if len(df) < 15:
         return False
 
-    indicators = populate_indicators(df, state.params)
+    indicators = populate_indicators(df, state.params, debug=debug, strategy_id=state.strategy_id)
     rsi_low = indicators.get("rsi_low")
     rsi_typical = indicators.get("rsi_typical")
     lower_count = state.params.get("lower_count", 10)
@@ -87,7 +101,14 @@ def go_long(state, df) -> bool:
     # Now RSI(Low) crosses above or equals RSI(TypicalPrice)
     rsi_crossover = (rsi_low.iloc[-3] < rsi_typical.iloc[-3]) and (rsi_low.iloc[-2] >= rsi_typical.iloc[-2])
 
-    return was_lower_count >= lower_count - 1 and rsi_crossover
+    result = was_lower_count >= lower_count - 1 and rsi_crossover
+
+    if debug:
+        _logger.info(
+            f"[SIGNAL-CHECK] {state.strategy_id}: cnt={was_lower_count}, " f"rsi_x={rsi_crossover} → go_long={result}"
+        )
+
+    return result
 
 
 def go_short(state, df) -> bool:

@@ -8,6 +8,11 @@ Original logic:
 - MACD1 line crosses above MACD2 signal
 """
 
+import logging
+
+# Logger for debug output (controlled by DEBUG_INDICATORS env var)
+_logger = logging.getLogger(__name__)
+
 STRATEGY_CONFIG = {
     "strategy_id": "",  # Use filename
     "symbol": "MGC",
@@ -38,7 +43,7 @@ STRATEGY_CONFIG = {
 }
 
 
-def populate_indicators(df, params):
+def populate_indicators(df, params, debug=False, strategy_id=""):
     """
     Calculate indicators for MACD above MA with dual MACD crossover.
     """
@@ -65,6 +70,17 @@ def populate_indicators(df, params):
     if macd2_result is not None:
         indicators["macd2_signal"] = macd2_result.iloc[:, 2]
 
+    # Debug logging if enabled
+    if debug and indicators.get("macd1_line") is not None and len(indicators["macd1_line"]) >= 3:
+        macd1 = indicators["macd1_line"]
+        macd1_ma = indicators.get("macd1_ma")
+        macd2_sig = indicators.get("macd2_signal")
+        _logger.info(
+            f"[INDICATOR] {strategy_id}: macd1[-2]={macd1.iloc[-2]:.2f}, "
+            f"macd1_ma[-2]={(macd1_ma.iloc[-2] if macd1_ma is not None else 0):.2f}, "
+            f"macd2_sig[-2]={(macd2_sig.iloc[-2] if macd2_sig is not None else 0):.2f}"
+        )
+
     return indicators
 
 
@@ -74,10 +90,12 @@ def go_long(state, df) -> bool:
     - MACD1 line above its MA
     - MACD1 line crosses above MACD2 signal
     """
+    debug = getattr(state, "debug_indicators", False)
+
     if len(df) < 4:
         return False
 
-    indicators = populate_indicators(df, state.params)
+    indicators = populate_indicators(df, state.params, debug=debug, strategy_id=state.strategy_id)
     macd1_line = indicators.get("macd1_line")
     macd1_ma = indicators.get("macd1_ma")
     macd2_signal = indicators.get("macd2_signal")
@@ -98,7 +116,15 @@ def go_long(state, df) -> bool:
 
     macd_crossover = (macd1_prev2 < macd2_prev2) and (macd1_prev1 > macd2_prev1)
 
-    return macd_above_ma and macd_crossover
+    result = macd_above_ma and macd_crossover
+
+    if debug:
+        _logger.info(
+            f"[SIGNAL-CHECK] {state.strategy_id}: macd_above_ma={macd_above_ma}, "
+            f"macd_crossover={macd_crossover} → go_long={result}"
+        )
+
+    return result
 
 
 def go_short(state, df) -> bool:
