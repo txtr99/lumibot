@@ -225,6 +225,7 @@ class MultiStrategyExecutorEnhanced:
         debug_indicators: bool = False,
         bracket_manager=None,
         order_registry=None,
+        live_mode: bool = False,
     ):
         """
         Initialize the enhanced MultiStrategyExecutor.
@@ -242,6 +243,7 @@ class MultiStrategyExecutorEnhanced:
             deep_portfolio_debug: Emit verbose per-iteration logs when True
             debug_indicators: Enable per-strategy indicator debug logging when True
             order_registry: OrderRegistry instance for centralized order tracking
+            live_mode: If True, always fetch fresh data from API (don't use prefetched store)
 
         Note:
             Tick sizes are now automatically looked up per symbol from futures_metadata
@@ -256,9 +258,13 @@ class MultiStrategyExecutorEnhanced:
         # (e.g., 61-min daily maintenance window that can't be forward-filled)
         self.FETCH_BUFFER_MINUTES = 400
         self.timestep = timestep
+        self.live_mode = live_mode
 
         # Initialize shared resources
-        self.shared_data = SharedDataManager(data_source, cache_ttl_seconds, verbose_logging=deep_portfolio_debug)
+        # In live mode, skip prefetched data store to avoid stale startup data
+        self.shared_data = SharedDataManager(
+            data_source, cache_ttl_seconds, verbose_logging=deep_portfolio_debug, live_mode=live_mode
+        )
         self.rate_limiter = GlobalRateLimiter(min_order_delay_seconds)
         self.attribution = StrategyAttribution(max_snapshots=max_snapshots)
         self.shared_initial_capital = shared_initial_capital

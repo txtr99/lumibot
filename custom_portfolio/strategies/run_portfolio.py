@@ -1867,6 +1867,7 @@ def run_live(args):
         ignore_calendar=False,  # ALWAYS enforce calendar in live mode (TopStepX compliance)
         bracket_manager=bracket_manager,  # For race-safe close pattern
         order_registry=order_registry,  # For bulletproof order tracking
+        live_mode=True,  # CRITICAL: Fetch fresh data from API, don't use stale prefetched data
     )
 
     # ========================================================================

@@ -321,6 +321,7 @@ class PortfolioManager:
         debug_indicators: bool = False,
         bracket_manager=None,
         order_registry=None,
+        live_mode: bool = False,
     ):
         """
         Initialize the PortfolioManager.
@@ -340,6 +341,7 @@ class PortfolioManager:
             debug_indicators: Enable per-strategy indicator debug logging when True
             bracket_manager: Optional BracketOrderManager for race-safe close pattern (live mode)
             order_registry: Optional OrderRegistry for bulletproof order tracking (live mode)
+            live_mode: If True, fetch fresh data from API on cache miss (don't use stale prefetched data)
 
         Note:
             Tick sizes are automatically looked up per symbol from futures_metadata
@@ -384,6 +386,7 @@ class PortfolioManager:
             "debug_indicators": debug_indicators,
             "bracket_manager": bracket_manager,
             "order_registry": order_registry,
+            "live_mode": live_mode,
         }
 
         # Auto-load strategies if requested

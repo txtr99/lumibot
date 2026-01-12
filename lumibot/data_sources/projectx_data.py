@@ -228,11 +228,11 @@ class ProjectXData(DataSource):
                 self.logger.error(f"Unsupported timespan: {timestep}")
                 return None
 
-            # ProjectX historical API has T+1 delay - today's data isn't available.
-            # End at yesterday's close (23:59:59) instead of now.
+            # Use current time for live trading - the API returns real-time bars
+            # Note: The previous T+1 delay comment was incorrect; get_last_price()
+            # already fetches current minute bars successfully using datetime.now()
             now = datetime.now().astimezone(LUMIBOT_DEFAULT_PYTZ)
-            yesterday = now - timedelta(days=1)
-            end_datetime = yesterday.replace(hour=23, minute=59, second=59, microsecond=999999)
+            end_datetime = now.replace(second=59, microsecond=999999)
 
             if timeshift:
                 if timestep == "minute":

@@ -1,2 +1,6 @@
 # Outstanding Todos
 
+## Deep Strategy Validation System - 2025-12-09 00:20
+
+- **Create strategy template compliance tests** - Build unit tests that validate strategy files match the expected template structure. **Problem:** Current `--validate` flag only checks if file loads and has `STRATEGY_CONFIG` - doesn't verify required functions exist with correct signatures, debug logging is wired up, return types are correct, or functions work with synthetic data. Newly converted strategies may pass validation but fail at runtime. **Files:** `custom_portfolio/strategies/run_portfolio.py:validate`, `custom_portfolio/strategies/templates/strategy_template.py` (reference), `tests/test_strategy_template_compliance.py` (new). **Solution:** Create test module that: (1) verifies required functions exist (`populate_indicators`, `go_long`, `go_short`, `generate_signal`, `get_signal_visibility`) with correct signatures, (2) checks `STRATEGY_CONFIG` has all required keys (`symbol`, `params`, `bracket_orders`, `time_exit`, `allowed_sessions`, `metadata`), (3) calls functions with synthetic OHLCV data + mock state to verify return types, (4) validates debug logging params (`debug`, `strategy_id`) are accepted. Both as standalone test module for CI and enhanced `--validate` for quick dev feedback. Could also feed validation errors back to skill for auto-correction.
+

@@ -58,7 +58,9 @@ class SharedDataManager:
         >>> nq_data = manager.get_cached_data('NQ', 100, '1M')
     """
 
-    def __init__(self, data_source, cache_ttl_seconds: int = 60, verbose_logging: bool = False):
+    def __init__(
+        self, data_source, cache_ttl_seconds: int = 60, verbose_logging: bool = False, live_mode: bool = False
+    ):
         """
         Initialize the SharedDataManager.
 
@@ -66,10 +68,13 @@ class SharedDataManager:
             data_source: DataSource instance for fetching market data
             cache_ttl_seconds: Time-to-live for cached data in seconds (default: 60)
             verbose_logging: Emit info-level SDM logs when True (default: False)
+            live_mode: If True, skip prefetched data store and always hit API on cache miss
+                       This prevents using stale startup data in live trading
         """
         self.data_source = data_source
         self.cache_ttl_seconds = cache_ttl_seconds
         self.verbose_logging = verbose_logging
+        self.live_mode = live_mode
 
         # Cache storage: {cache_key: data}
         self.cache: Dict[str, any] = {}
@@ -312,9 +317,16 @@ class SharedDataManager:
                 unique_symbols = list(set(symbols))
                 if debug_enabled:
                     self.logger.debug(f"[SDM] phase1 unique_symbols={unique_symbols}")
-                prefetched_index = self._prefetched_index_by_symbol()
-                if debug_enabled:
-                    self.logger.debug(f"[SDM] prefetched_index keys={list(prefetched_index.keys())}")
+
+                # In live mode, skip prefetched store - it contains stale startup data
+                if self.live_mode:
+                    prefetched_index = {}
+                    if debug_enabled:
+                        self.logger.debug("[SDM] live_mode=True, skipping prefetched store")
+                else:
+                    prefetched_index = self._prefetched_index_by_symbol()
+                    if debug_enabled:
+                        self.logger.debug(f"[SDM] prefetched_index keys={list(prefetched_index.keys())}")
 
                 # If everything is already cached, count as hits and return
                 all_cached = True
@@ -364,24 +376,27 @@ class SharedDataManager:
             return
 
         # Phase 2 (outside lock): try datasource store, then perform API fetches only if needed
-        # Build a fast index of datasource store once
+        # In live mode, skip store lookup entirely - it contains stale startup data
         store_index = {}
-        store = getattr(self.data_source, "pandas_data", None)
-        if store and isinstance(store, dict):
-            for key, data_obj in store.items():
-                try:
-                    asset = key[0] if isinstance(key, tuple) else key
-                    symbol = getattr(asset, "symbol", None)
-                    if symbol:
-                        store_index[symbol] = data_obj
-                except Exception:
-                    continue
-        if debug_enabled:
-            self.logger.debug(f"[SDM] phase2 store_index keys={list(store_index.keys())} from datasource")
+        if not self.live_mode:
+            store = getattr(self.data_source, "pandas_data", None)
+            if store and isinstance(store, dict):
+                for key, data_obj in store.items():
+                    try:
+                        asset = key[0] if isinstance(key, tuple) else key
+                        symbol = getattr(asset, "symbol", None)
+                        if symbol:
+                            store_index[symbol] = data_obj
+                    except Exception:
+                        continue
+            if debug_enabled:
+                self.logger.debug(f"[SDM] phase2 store_index keys={list(store_index.keys())} from datasource")
+        elif debug_enabled:
+            self.logger.debug("[SDM] phase2 live_mode=True, skipping datasource store")
 
         for symbol, cache_key in to_fetch:
             per_symbol_start = time.perf_counter()
-            # Try grabbing from datasource store directly to avoid API
+            # Try grabbing from datasource store directly to avoid API (backtest only)
             data_obj = store_index.get(symbol)
             if data_obj is not None:
                 # Apply forward-fill for small gaps before caching
@@ -397,7 +412,7 @@ class SharedDataManager:
                 )
                 continue
 
-            # If still not cached, fall back to API
+            # API fetch (always used in live mode, fallback in backtest)
             with self.lock:
                 already_cached = cache_key in self.cache
             if already_cached:
